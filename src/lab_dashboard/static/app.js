@@ -27,6 +27,8 @@ const state = {
   query: "",
   pendingAction: null,
   jobPoll: null,
+  logPoll: null,
+  currentLogJob: null,
 };
 
 const actionLabels = {
@@ -41,6 +43,16 @@ const healthLabels = {
   occupied: "다른 서비스",
   degraded: "점검 필요",
   not_configured: "해당 없음",
+};
+
+const jobStatusLabels = {
+  queued: "대기",
+  running: "실행 중",
+  succeeded: "완료",
+  failed: "실패",
+  timed_out: "시간 초과",
+  stopped: "중지됨",
+  canceled: "취소됨",
 };
 
 function escapeHTML(value) {
@@ -291,7 +303,7 @@ function renderActivity() {
             <strong>${escapeHTML(job.project_name)} · ${escapeHTML(actionLabels[job.action] || job.action)}</strong>
             <small>${relativeTime(job.created_at)}</small>
           </div>
-          <span class="job-status">${escapeHTML(job.status)}</span>
+          <span class="job-status">${escapeHTML(jobStatusLabels[job.status] || job.status)}</span>
         </article>
       `,
     )
@@ -324,16 +336,26 @@ function openDrawer(projectId) {
   if (!project) return;
   const dirtyCount = project.git.modified + project.git.untracked;
   const actions = project.available_actions
-    .map(
-      (action) => `
-        <button class="drawer-action" data-project-action="${escapeHTML(action)}" data-project-id="${escapeHTML(project.id)}">
+    .map((action) => {
+      const canStopService =
+        action === "stop" && project.active_job?.kind === "service";
+      const disabled = Boolean(project.active_job) && !canStopService;
+      return `
+        <button
+          class="drawer-action"
+          data-project-action="${escapeHTML(action)}"
+          data-project-id="${escapeHTML(project.id)}"
+          ${disabled ? "disabled" : ""}
+        >
           ${icons[action === "start" ? "play" : action === "stop" ? "stop" : "check"]}
           ${escapeHTML(actionLabels[action] || action)}
         </button>
-      `,
-    )
+      `;
+    })
     .join("");
   const commit = project.git.last_commit;
+  const ports = project.ports || [];
+  const syncState = `↑ ${project.git.ahead} · ↓ ${project.git.behind}`;
   document.getElementById("drawerContent").innerHTML = `
     <div class="${accentClass(project.id)}">
       <div class="drawer-project-head">
@@ -363,7 +385,19 @@ function openDrawer(projectId) {
           </div>
           <div class="detail-card">
             <span>Ports</span>
-            <strong>${escapeHTML(project.ports.length ? project.ports.join(", ") : "—")}</strong>
+            <strong>${escapeHTML(ports.length ? ports.join(", ") : "—")}</strong>
+          </div>
+          <div class="detail-card">
+            <span>Upstream</span>
+            <strong>${escapeHTML(syncState)}</strong>
+          </div>
+          <div class="detail-card">
+            <span>Dashboard job</span>
+            <strong>${
+              project.active_job
+                ? escapeHTML(jobStatusLabels[project.active_job.status] || project.active_job.status)
+                : "Idle"
+            }</strong>
           </div>
         </div>
       </section>
@@ -387,9 +421,18 @@ function openDrawer(projectId) {
         }
       </section>
 
-      <a class="github-project-link" href="${escapeHTML(project.github)}" target="_blank" rel="noreferrer">
-        <span>GitHub에서 저장소 열기</span><span>↗</span>
-      </a>
+      <div class="project-links">
+        ${
+          project.app_url
+            ? `<a class="github-project-link" href="${escapeHTML(project.app_url)}" target="_blank" rel="noreferrer">
+                <span>로컬 앱 열기</span><span>↗</span>
+              </a>`
+            : ""
+        }
+        <a class="github-project-link" href="${escapeHTML(project.github)}" target="_blank" rel="noreferrer">
+          <span>GitHub에서 저장소 열기</span><span>↗</span>
+        </a>
+      </div>
     </div>
   `;
   document.getElementById("projectDrawer").classList.add("is-open");
@@ -478,23 +521,36 @@ async function executePendingAction() {
   }
 }
 
-async function openLog(jobId) {
+async function refreshLog(jobId) {
+  if (state.currentLogJob !== jobId) return;
+  try {
+    const data = await fetchJSON(`/api/jobs/${encodeURIComponent(jobId)}/log`);
+    const output = document.getElementById("logOutput");
+    const nearBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 40;
+    output.textContent = data.log || "아직 출력된 로그가 없습니다.";
+    if (nearBottom) output.scrollTop = output.scrollHeight;
+  } catch (error) {
+    document.getElementById("logOutput").textContent = error.message;
+  }
+}
+
+function openLog(jobId) {
   const job = state.jobs.find((item) => item.id === jobId);
   document.getElementById("logTitle").textContent =
     job ? `${job.project_name} · ${actionLabels[job.action] || job.action}` : "작업 로그";
   document.getElementById("logOutput").textContent = "로그를 불러오는 중…";
   document.getElementById("logBackdrop").classList.add("is-open");
   document.body.classList.add("no-scroll");
-  try {
-    const data = await fetchJSON(`/api/jobs/${encodeURIComponent(jobId)}/log`);
-    document.getElementById("logOutput").textContent =
-      data.log || "아직 출력된 로그가 없습니다.";
-  } catch (error) {
-    document.getElementById("logOutput").textContent = error.message;
-  }
+  state.currentLogJob = jobId;
+  if (state.logPoll) window.clearInterval(state.logPoll);
+  refreshLog(jobId);
+  state.logPoll = window.setInterval(() => refreshLog(jobId), 1500);
 }
 
 function closeLog() {
+  if (state.logPoll) window.clearInterval(state.logPoll);
+  state.logPoll = null;
+  state.currentLogJob = null;
   document.getElementById("logBackdrop").classList.remove("is-open");
   document.body.classList.remove("no-scroll");
 }

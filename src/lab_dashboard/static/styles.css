@@ -1326,6 +1326,11 @@ kbd {
   background: var(--mint);
 }
 
+.job-dot.stopped,
+.job-dot.canceled {
+  background: var(--amber);
+}
+
 .job-dot.failed,
 .job-dot.timed_out {
   background: var(--coral);
@@ -1563,6 +1568,16 @@ kbd {
   color: var(--text);
 }
 
+.drawer-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.drawer-action:disabled:hover {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
 .drawer-action svg {
   width: 13px;
   height: 13px;
@@ -1648,11 +1663,16 @@ kbd {
   font-size: 8px;
 }
 
+.project-links {
+  display: grid;
+  gap: 7px;
+  margin-top: 22px;
+}
+
 .github-project-link {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 22px;
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 11px 12px;

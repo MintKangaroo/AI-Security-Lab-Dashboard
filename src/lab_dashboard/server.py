@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import threading
 import urllib.error
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -31,14 +33,17 @@ def utc_now() -> str:
 
 
 def _run_capture(command: list[str], cwd: Path, timeout: float = 4.0) -> str:
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
@@ -140,6 +145,7 @@ class Job:
     project_name: str
     action: str
     command: list[str]
+    kind: str = "task"
     status: str = "queued"
     created_at: str = field(default_factory=utc_now)
     started_at: str | None = None
@@ -150,16 +156,27 @@ class Job:
     def public(self) -> dict[str, Any]:
         payload = asdict(self)
         payload.pop("command", None)
+        payload.pop("log_path", None)
         return payload
+
+
+class JobConflictError(RuntimeError):
+    """Raised when an action conflicts with an active project job."""
 
 
 class JobManager:
     def __init__(self, runtime_root: Path = RUNTIME_ROOT) -> None:
         self.runtime_root = runtime_root
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        self._executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="lab-job")
+        self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="lab-job")
         self._jobs: dict[str, Job] = {}
+        self._active_projects: dict[str, str] = {}
+        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._managed_projects: dict[str, str] = {}
+        self._process_ready: dict[str, threading.Event] = {}
+        self._stop_requested: set[str] = set()
         self._lock = threading.Lock()
+        self._closed = False
 
     def submit(
         self,
@@ -168,6 +185,8 @@ class JobManager:
         action: str,
         command: list[str],
         cwd: Path,
+        *,
+        managed: bool = False,
     ) -> Job:
         job = Job(
             id=uuid.uuid4().hex[:12],
@@ -175,19 +194,28 @@ class JobManager:
             project_name=project_name,
             action=action,
             command=list(command),
+            kind="service" if managed else "task",
         )
+        job.log_path = str(self.runtime_root / f"{job.id}.log")
         with self._lock:
+            if self._closed:
+                raise JobConflictError("작업 관리자가 종료 중입니다.")
+            if project_id in self._active_projects:
+                raise JobConflictError("이 프로젝트에서 이미 작업이 실행 중입니다.")
             self._jobs[job.id] = job
+            self._active_projects[project_id] = job.id
+            if managed:
+                self._process_ready[project_id] = threading.Event()
         self._executor.submit(self._execute, job, cwd)
         return job
 
     def _execute(self, job: Job, cwd: Path) -> None:
-        log_path = self.runtime_root / f"{job.id}.log"
+        log_path = Path(job.log_path or self.runtime_root / f"{job.id}.log")
         with self._lock:
             job.status = "running"
             job.started_at = utc_now()
-            job.log_path = str(log_path)
 
+        process: subprocess.Popen[str] | None = None
         try:
             with log_path.open("w", encoding="utf-8") as log:
                 log.write(f"$ {' '.join(job.command)}\n\n")
@@ -200,10 +228,24 @@ class JobManager:
                     text=True,
                     start_new_session=True,
                 )
-                exit_code = process.wait(timeout=1800)
-            status = "succeeded" if exit_code == 0 else "failed"
+                with self._lock:
+                    self._processes[job.id] = process
+                    if job.kind == "service":
+                        self._managed_projects[job.project_id] = job.id
+                        self._process_ready[job.project_id].set()
+                    closing = self._closed
+                    if closing:
+                        self._stop_requested.add(job.id)
+                if closing:
+                    self._terminate_process(process)
+                timeout = None if job.kind == "service" else 1800
+                exit_code = process.wait(timeout=timeout)
+            with self._lock:
+                stopped = job.id in self._stop_requested
+            status = "stopped" if stopped else ("succeeded" if exit_code == 0 else "failed")
         except subprocess.TimeoutExpired:
-            process.terminate()
+            if process is not None:
+                self._terminate_process(process)
             exit_code = -1
             status = "timed_out"
             with log_path.open("a", encoding="utf-8") as log:
@@ -218,6 +260,99 @@ class JobManager:
             job.status = status
             job.exit_code = exit_code
             job.finished_at = utc_now()
+            self._processes.pop(job.id, None)
+            if self._active_projects.get(job.project_id) == job.id:
+                self._active_projects.pop(job.project_id, None)
+            if self._managed_projects.get(job.project_id) == job.id:
+                self._managed_projects.pop(job.project_id, None)
+            ready_event = self._process_ready.pop(job.project_id, None)
+            if ready_event:
+                ready_event.set()
+            self._stop_requested.discard(job.id)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str], grace_seconds: float = 5.0) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            try:
+                process.terminate()
+            except OSError:
+                return
+        try:
+            process.wait(timeout=grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            try:
+                process.kill()
+            except OSError:
+                return
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+
+    def stop_managed(self, project_id: str, project_name: str) -> Job:
+        with self._lock:
+            ready_event = self._process_ready.get(project_id)
+            should_wait = project_id in self._active_projects and ready_event is not None
+        if should_wait:
+            ready_event.wait(timeout=2)
+
+        with self._lock:
+            if self._closed:
+                raise JobConflictError("작업 관리자가 종료 중입니다.")
+            start_job_id = self._managed_projects.get(project_id)
+            process = self._processes.get(start_job_id or "")
+            if not start_job_id or process is None:
+                if project_id in self._active_projects:
+                    message = "서비스가 아직 시작 중입니다. 잠시 후 다시 시도해 주세요."
+                    raise JobConflictError(message)
+                raise JobConflictError("이 대시보드가 시작한 실행 중 서비스가 없습니다.")
+            if start_job_id in self._stop_requested:
+                raise JobConflictError("서비스 중지 작업이 이미 진행 중입니다.")
+
+            self._stop_requested.add(start_job_id)
+            job = Job(
+                id=uuid.uuid4().hex[:12],
+                project_id=project_id,
+                project_name=project_name,
+                action="stop",
+                command=["dashboard", "stop-managed-service"],
+            )
+            job.log_path = str(self.runtime_root / f"{job.id}.log")
+            self._jobs[job.id] = job
+        self._executor.submit(self._execute_managed_stop, job, process)
+        return job
+
+    def _execute_managed_stop(
+        self,
+        job: Job,
+        process: subprocess.Popen[str],
+    ) -> None:
+        log_path = Path(job.log_path or self.runtime_root / f"{job.id}.log")
+        with self._lock:
+            job.status = "running"
+            job.started_at = utc_now()
+        try:
+            with log_path.open("w", encoding="utf-8") as log:
+                log.write(f"Stopping managed service for {job.project_name}.\n")
+            self._terminate_process(process)
+            exit_code = 0
+            status = "succeeded"
+        except OSError as exc:
+            exit_code = -1
+            status = "failed"
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"Could not stop managed service: {exc}\n")
+        with self._lock:
+            job.status = status
+            job.exit_code = exit_code
+            job.finished_at = utc_now()
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -228,20 +363,47 @@ class JobManager:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def active_for(self, project_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            job_id = self._active_projects.get(project_id)
+            job = self._jobs.get(job_id or "")
+            return job.public() if job else None
+
     def read_log(self, job_id: str, max_bytes: int = 64_000) -> str | None:
         job = self.get(job_id)
-        if not job or not job.log_path:
+        if not job:
             return None
-        path = Path(job.log_path)
+        path = Path(job.log_path or self.runtime_root / f"{job.id}.log")
         if not path.is_file():
             return ""
         with path.open("rb") as handle:
             handle.seek(max(0, path.stat().st_size - max_bytes))
             return handle.read().decode("utf-8", errors="replace")
 
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            processes = list(self._processes.items())
+            for job_id, _process in processes:
+                self._stop_requested.add(job_id)
+            for job in self._jobs.values():
+                if job.status == "queued":
+                    job.status = "canceled"
+                    job.finished_at = utc_now()
+        for _job_id, process in processes:
+            self._terminate_process(process)
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
 
 class Dashboard:
-    def __init__(self, config_path: Path = DEFAULT_CONFIG, lab_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path = DEFAULT_CONFIG,
+        lab_root: Path | None = None,
+        jobs: JobManager | None = None,
+    ) -> None:
         self.config_path = config_path.resolve()
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
         configured_root = os.getenv("AI_SECURITY_LAB_ROOT", config.get("lab_root", ".."))
@@ -253,7 +415,7 @@ class Dashboard:
         self.lab_root = lab_root.resolve()
         self.projects = config["projects"]
         self.project_map = {project["id"]: project for project in self.projects}
-        self.jobs = JobManager()
+        self.jobs = jobs or JobManager()
         self._validate()
 
     def _validate(self) -> None:
@@ -264,6 +426,8 @@ class Dashboard:
                 raise ValueError(f"Duplicate project id: {project_id}")
             seen.add(project_id)
             _safe_project_path(self.lab_root, project["path"])
+            if project.get("managed_start") and "start" not in project.get("actions", {}):
+                raise ValueError(f"Managed project must define a start action: {project_id}")
             for action, command in project.get("actions", {}).items():
                 if action not in {"start", "stop", "test"}:
                     raise ValueError(f"Unsupported action for {project_id}: {action}")
@@ -287,7 +451,17 @@ class Dashboard:
         snapshot["exists"] = project_path.is_dir()
         snapshot["git"] = git_status(project_path)
         snapshot["health"] = health
-        snapshot["available_actions"] = list(project.get("actions", {}).keys())
+        active_job = self.jobs.active_for(project["id"])
+        available_actions = list(project.get("actions", {}).keys())
+        if (
+            project.get("managed_start")
+            and active_job
+            and active_job["kind"] == "service"
+            and "stop" not in available_actions
+        ):
+            available_actions.append("stop")
+        snapshot["available_actions"] = available_actions
+        snapshot["active_job"] = active_job
         return snapshot
 
     def overview(self) -> dict[str, Any]:
@@ -339,13 +513,26 @@ class Dashboard:
         project = self.project_map.get(project_id)
         if not project:
             raise KeyError("project")
+        if action == "stop" and project.get("managed_start"):
+            return self.jobs.stop_managed(project_id, project["name"])
         command = project.get("actions", {}).get(action)
         if not command:
             raise KeyError("action")
         project_path = _safe_project_path(self.lab_root, project["path"])
         if not project_path.is_dir():
             raise FileNotFoundError(project_path)
-        return self.jobs.submit(project_id, project["name"], action, command, project_path)
+        managed = bool(project.get("managed_start") and action == "start")
+        return self.jobs.submit(
+            project_id,
+            project["name"],
+            action,
+            command,
+            project_path,
+            managed=managed,
+        )
+
+    def close(self) -> None:
+        self.jobs.shutdown()
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -385,6 +572,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             length = int(raw_length)
         except ValueError as exc:
             raise ValueError("Invalid Content-Length") from exc
+        if length < 0:
+            raise ValueError("Invalid Content-Length")
         if length > MAX_BODY_SIZE:
             raise OverflowError("Request body is too large")
         if length == 0:
@@ -453,6 +642,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except KeyError:
                 self._error(HTTPStatus.NOT_FOUND, "프로젝트 또는 작업을 찾을 수 없습니다.")
                 return
+            except JobConflictError as exc:
+                self._error(HTTPStatus.CONFLICT, str(exc))
+                return
             except FileNotFoundError:
                 self._error(HTTPStatus.CONFLICT, "로컬 프로젝트 디렉터리를 찾을 수 없습니다.")
                 return
@@ -478,15 +670,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         jobs: list[dict[str, Any]] = []
         skipped: list[str] = []
+        conflicts: list[dict[str, str]] = []
         for project_id in dict.fromkeys(project_ids):
             try:
                 jobs.append(self.dashboard.run_action(project_id, action).public())
+            except JobConflictError as exc:
+                conflicts.append({"project_id": project_id, "reason": str(exc)})
             except (KeyError, FileNotFoundError):
                 skipped.append(project_id)
         if not jobs:
-            self._error(HTTPStatus.CONFLICT, "선택한 프로젝트에 실행 가능한 작업이 없습니다.")
+            message = "선택한 프로젝트에 실행 가능한 작업이 없거나 이미 작업 중입니다."
+            self._error(HTTPStatus.CONFLICT, message)
             return
-        self._json({"jobs": jobs, "skipped": skipped}, HTTPStatus.ACCEPTED)
+        self._json(
+            {"jobs": jobs, "skipped": skipped, "conflicts": conflicts},
+            HTTPStatus.ACCEPTED,
+        )
 
     def _serve_static(self, path: str) -> None:
         relative = "index.html" if path in {"", "/"} else path.lstrip("/")
@@ -520,7 +719,9 @@ def create_server(
         pass
 
     BoundHandler.dashboard = active_dashboard
-    return ThreadingHTTPServer((host, port), BoundHandler)
+    server = ThreadingHTTPServer((host, port), BoundHandler)
+    server.daemon_threads = True
+    return server
 
 
 def main() -> None:
@@ -540,6 +741,7 @@ def main() -> None:
         print("\nDashboard stopped.")
     finally:
         server.server_close()
+        dashboard.close()
 
 
 if __name__ == "__main__":
