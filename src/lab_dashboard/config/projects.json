@@ -1,0 +1,127 @@
+{
+  "lab_root": "..",
+  "projects": [
+    {
+      "id": "aishield",
+      "name": "AIShield",
+      "short_name": "AS",
+      "path": "aishield",
+      "github": "https://github.com/MintKangaroo/AIShield",
+      "description": "AI 모델의 적대적 강건성을 재현 가능하게 평가하는 연구 플랫폼",
+      "category": "AI Defense",
+      "stage": "Clean baseline",
+      "accent": "#89e8c8",
+      "stack": ["Python", "PyTorch", "FastAPI", "React"],
+      "ports": [3000, 8000],
+      "app_url": "http://127.0.0.1:3000",
+      "health_url": "http://127.0.0.1:8000/api/v1/health/live",
+      "health_contains": "aishield",
+      "actions": {
+        "start": ["docker", "compose", "up", "-d", "--build"],
+        "stop": ["docker", "compose", "down"],
+        "test": ["make", "test"]
+      }
+    },
+    {
+      "id": "autopentest-ai",
+      "name": "AutoPentest AI",
+      "short_name": "AP",
+      "path": "autopentest-ai",
+      "github": "https://github.com/MintKangaroo/AutoPentest-AI",
+      "description": "허가된 로컬 랩을 위한 정책 통제형 모의침투 지원 플랫폼",
+      "category": "Validation",
+      "stage": "Auth & target policy",
+      "accent": "#f6c66d",
+      "stack": ["Python", "FastAPI", "React", "PostgreSQL"],
+      "ports": [5173, 8000],
+      "app_url": "http://127.0.0.1:5173",
+      "health_url": "http://127.0.0.1:8000/health/live",
+      "health_contains": "autopentest",
+      "actions": {
+        "start": ["docker", "compose", "up", "-d", "--build"],
+        "stop": ["docker", "compose", "down"],
+        "test": ["make", "test"]
+      }
+    },
+    {
+      "id": "redmind",
+      "name": "RedMind",
+      "short_name": "RM",
+      "path": "redmind",
+      "github": "https://github.com/MintKangaroo/RedMind",
+      "description": "승인과 증거를 중심으로 움직이는 Multi-Agent 보안 연구 런타임",
+      "category": "AI Research",
+      "stage": "Execution timeline",
+      "accent": "#d8a7ff",
+      "stack": ["Python", "Pydantic", "Multi-Agent"],
+      "ports": [],
+      "app_url": null,
+      "health_url": null,
+      "actions": {
+        "test": ["make", "test"]
+      }
+    },
+    {
+      "id": "rlattack",
+      "name": "RLAttack",
+      "short_name": "RL",
+      "path": "rlattack",
+      "github": "https://github.com/MintKangaroo/RLattack",
+      "description": "결정론적 시뮬레이션에서 공격 경로 전략을 비교하는 RL 연구 플랫폼",
+      "category": "Simulation",
+      "stage": "PPO benchmark",
+      "accent": "#89b8ff",
+      "stack": ["Python", "Gymnasium", "PPO", "Streamlit"],
+      "ports": [8501],
+      "app_url": "http://127.0.0.1:8501",
+      "health_url": "http://127.0.0.1:8501/_stcore/health",
+      "health_contains": "ok",
+      "actions": {
+        "start": [".venv/bin/python", "-m", "rlattack", "dashboard"],
+        "test": ["make", "test"]
+      }
+    },
+    {
+      "id": "sentinelflow",
+      "name": "SentinelFlow",
+      "short_name": "SF",
+      "path": "sentinelflow",
+      "github": "https://github.com/MintKangaroo/SentinelFlow",
+      "description": "탐지부터 승인·대응·검증까지 연결하는 보안 운영 Control Plane",
+      "category": "Control Plane",
+      "stage": "Versioned playbooks",
+      "accent": "#ff8f81",
+      "stack": ["Python", "FastAPI", "React", "Celery"],
+      "ports": [3000, 8000],
+      "app_url": "http://127.0.0.1:3000",
+      "health_url": "http://127.0.0.1:8000/api/v1/health/live",
+      "health_contains": "sentinelflow",
+      "actions": {
+        "start": ["docker", "compose", "up", "-d", "--build"],
+        "stop": ["docker", "compose", "down"],
+        "test": ["make", "test"]
+      }
+    },
+    {
+      "id": "threatgraph",
+      "name": "ThreatGraph",
+      "short_name": "TG",
+      "path": "threatgraph",
+      "github": "https://github.com/MintKangaroo/ThreatGraph",
+      "description": "IOC와 보안 이벤트를 증거 기반 그래프로 연결하는 위협 인텔리전스 계층",
+      "category": "Threat Intel",
+      "stage": "STIX ingestion",
+      "accent": "#66d4ef",
+      "stack": ["Python", "Neo4j", "FastAPI", "React"],
+      "ports": [5173, 7474, 7687, 8000],
+      "app_url": "http://127.0.0.1:5173",
+      "health_url": "http://127.0.0.1:8000/api/v1/health/live",
+      "health_contains": "threatgraph",
+      "actions": {
+        "start": ["docker", "compose", "up", "-d", "--build"],
+        "stop": ["docker", "compose", "down"],
+        "test": ["make", "test"]
+      }
+    }
+  ]
+}

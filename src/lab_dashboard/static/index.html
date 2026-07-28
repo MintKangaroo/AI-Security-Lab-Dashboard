@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="AI Security Lab 프로젝트를 한 곳에서 관리하는 로컬 대시보드"
+    />
+    <title>AI Security Lab — Control Room</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div>
+            <strong>AI Security Lab</strong>
+            <span>Control room</span>
+          </div>
+        </div>
+
+        <nav class="primary-nav" aria-label="주 메뉴">
+          <button class="nav-item is-active" data-view="overview">
+            <span class="nav-icon" data-icon="grid"></span>
+            Overview
+          </button>
+          <button class="nav-item" data-view="projects">
+            <span class="nav-icon" data-icon="layers"></span>
+            Projects
+            <span class="nav-count" id="projectCount">—</span>
+          </button>
+          <button class="nav-item" data-view="activity">
+            <span class="nav-icon" data-icon="activity"></span>
+            Activity
+            <span class="activity-dot is-hidden" id="activityDot"></span>
+          </button>
+        </nav>
+
+        <div class="sidebar-section">
+          <p class="eyebrow">Saved views</p>
+          <button class="saved-view" data-filter="dirty">
+            <span class="view-dot amber"></span>
+            변경사항 있음
+            <span id="dirtyNavCount">—</span>
+          </button>
+          <button class="saved-view" data-filter="online">
+            <span class="view-dot mint"></span>
+            실행 중
+            <span id="onlineNavCount">—</span>
+          </button>
+          <button class="saved-view" data-filter="offline">
+            <span class="view-dot slate"></span>
+            오프라인
+          </button>
+        </div>
+
+        <div class="lab-location">
+          <div class="location-head">
+            <span class="pulse"></span>
+            <span>Local workspace</span>
+          </div>
+          <code id="labRoot">연결 중…</code>
+        </div>
+
+        <div class="sidebar-footer">
+          <a
+            href="https://github.com/MintKangaroo?tab=repositories"
+            target="_blank"
+            rel="noreferrer"
+            class="github-link"
+          >
+            <span data-icon="github"></span>
+            MintKangaroo
+            <span class="arrow">↗</span>
+          </a>
+          <span>Local-only · v0.1.0</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobileMenu" aria-label="메뉴 열기">
+            <span data-icon="menu"></span>
+          </button>
+          <div class="topbar-title">
+            <span class="breadcrumb">Workspace /</span>
+            <strong id="viewTitle">Overview</strong>
+          </div>
+          <div class="topbar-actions">
+            <button class="command-trigger" id="searchFocus">
+              <span data-icon="search"></span>
+              <span>프로젝트 검색</span>
+              <kbd>/</kbd>
+            </button>
+            <div class="sync-status">
+              <span class="sync-dot"></span>
+              <span id="syncLabel">동기화 중</span>
+            </div>
+            <button class="icon-button" id="refreshButton" aria-label="새로고침">
+              <span data-icon="refresh"></span>
+            </button>
+          </div>
+        </header>
+
+        <div class="content">
+          <section class="hero">
+            <div>
+              <p class="eyebrow mint-text">Portfolio control</p>
+              <h1>연구의 흐름을<br /><em>한눈에.</em></h1>
+              <p class="hero-copy">
+                여섯 개의 AI 보안 프로젝트, 하나의 작업 공간.<br />
+                실행 상태와 코드 변경을 놓치지 않고 관리하세요.
+              </p>
+            </div>
+            <div class="hero-orbit" aria-hidden="true">
+              <div class="orbit-ring ring-one"></div>
+              <div class="orbit-ring ring-two"></div>
+              <div class="orbit-core">
+                <span id="heroProjectCount">6</span>
+                <small>PROJECTS</small>
+              </div>
+              <span class="orbit-node node-one"></span>
+              <span class="orbit-node node-two"></span>
+              <span class="orbit-node node-three"></span>
+            </div>
+          </section>
+
+          <section class="metrics" aria-label="포트폴리오 요약">
+            <article class="metric-card">
+              <div class="metric-icon mint-bg"><span data-icon="layers"></span></div>
+              <div>
+                <span class="metric-label">전체 프로젝트</span>
+                <strong id="totalMetric">—</strong>
+                <small>registered repositories</small>
+              </div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-icon blue-bg"><span data-icon="radio"></span></div>
+              <div>
+                <span class="metric-label">실행 중</span>
+                <strong id="onlineMetric">—</strong>
+                <small id="onlineCaption">health endpoints</small>
+              </div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-icon amber-bg"><span data-icon="git"></span></div>
+              <div>
+                <span class="metric-label">로컬 변경</span>
+                <strong id="changesMetric">—</strong>
+                <small id="changesCaption">working tree files</small>
+              </div>
+            </article>
+            <article class="metric-card">
+              <div class="metric-icon coral-bg"><span data-icon="alert"></span></div>
+              <div>
+                <span class="metric-label">포트 충돌</span>
+                <strong id="conflictsMetric">—</strong>
+                <small>shared default ports</small>
+              </div>
+            </article>
+          </section>
+
+          <div class="dashboard-grid">
+            <section class="panel portfolio-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Active portfolio</p>
+                  <h2>프로젝트 현황</h2>
+                </div>
+                <div class="panel-tools">
+                  <label class="search-field">
+                    <span data-icon="search"></span>
+                    <input
+                      id="projectSearch"
+                      type="search"
+                      placeholder="이름, 스택, 브랜치 검색"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <div class="filter-tabs" role="group" aria-label="프로젝트 필터">
+                    <button class="filter-tab is-active" data-filter="all">전체</button>
+                    <button class="filter-tab" data-filter="dirty">변경</button>
+                    <button class="filter-tab" data-filter="online">실행</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="project-table-head" aria-hidden="true">
+                <span class="select-column"></span>
+                <span>PROJECT</span>
+                <span>STAGE</span>
+                <span>RUNTIME</span>
+                <span>GIT STATUS</span>
+                <span></span>
+              </div>
+
+              <div id="projectList" class="project-list" aria-live="polite">
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+              </div>
+
+              <div class="empty-state is-hidden" id="emptyState">
+                <span data-icon="search"></span>
+                <h3>조건에 맞는 프로젝트가 없습니다</h3>
+                <p>검색어나 필터를 바꿔보세요.</p>
+              </div>
+            </section>
+
+            <aside class="right-rail">
+              <section class="panel signal-panel">
+                <div class="panel-head compact">
+                  <div>
+                    <p class="eyebrow">Lab signals</p>
+                    <h2>운영 신호</h2>
+                  </div>
+                  <span class="live-badge"><i></i> LIVE</span>
+                </div>
+                <div id="signalsList" class="signals-list">
+                  <div class="signal-loading">환경을 점검하고 있습니다…</div>
+                </div>
+              </section>
+
+              <section class="panel activity-panel">
+                <div class="panel-head compact">
+                  <div>
+                    <p class="eyebrow">Command history</p>
+                    <h2>최근 작업</h2>
+                  </div>
+                  <button class="text-button" id="viewAllActivity">전체 보기</button>
+                </div>
+                <div id="activityList" class="activity-list">
+                  <div class="activity-empty">
+                    아직 실행한 작업이 없습니다.
+                  </div>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div class="bulk-bar" id="bulkBar" aria-live="polite">
+      <div>
+        <button class="clear-selection" id="clearSelection" aria-label="선택 해제">×</button>
+        <strong><span id="selectionCount">0</span>개 선택</strong>
+      </div>
+      <span class="bulk-divider"></span>
+      <button data-bulk-action="start"><span data-icon="play"></span> 시작</button>
+      <button data-bulk-action="test"><span data-icon="check"></span> 테스트</button>
+      <button data-bulk-action="stop" class="danger"><span data-icon="stop"></span> 중지</button>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
+    <aside class="drawer" id="projectDrawer" aria-hidden="true">
+      <div class="drawer-head">
+        <span class="eyebrow">Project detail</span>
+        <button class="icon-button" id="closeDrawer" aria-label="상세 패널 닫기">
+          <span data-icon="close"></span>
+        </button>
+      </div>
+      <div id="drawerContent"></div>
+    </aside>
+
+    <div class="modal-backdrop" id="modalBackdrop">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-icon"><span data-icon="terminal"></span></div>
+        <h2 id="modalTitle">작업을 실행할까요?</h2>
+        <p id="modalDescription"></p>
+        <div class="modal-actions">
+          <button class="secondary-button" id="cancelAction">취소</button>
+          <button class="primary-button" id="confirmAction">실행</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="log-backdrop" id="logBackdrop">
+      <section class="log-modal" role="dialog" aria-modal="true" aria-labelledby="logTitle">
+        <header>
+          <div>
+            <span class="eyebrow">Task output</span>
+            <h2 id="logTitle">작업 로그</h2>
+          </div>
+          <button class="icon-button" id="closeLog" aria-label="로그 닫기">
+            <span data-icon="close"></span>
+          </button>
+        </header>
+        <pre id="logOutput">로그를 불러오는 중…</pre>
+      </section>
+    </div>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
