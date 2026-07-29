@@ -1,7 +1,8 @@
 # AI Security Lab Dashboard
 
 `AI_Security_Lab` 아래의 연구 프로젝트를 한 화면에서 점검하고 관리하는 로컬 Control
-Room입니다. AIShield, AutoPentest AI, RedMind, RLAttack, SentinelFlow, ThreatGraph의
+Room입니다. AIShield, AutoPentest AI, RedMind, RLAttack, SentinelFlow, ThreatGraph,
+Caldera Lab의
 Git 작업 상태와 서비스 상태를 자동으로 수집합니다.
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
@@ -28,6 +29,7 @@ Git 작업 상태와 서비스 상태를 자동으로 수집합니다.
 | [RLAttack](https://github.com/MintKangaroo/RLattack) | 재현 가능한 공격 경로 시뮬레이션 | PPO benchmark | `:8501` |
 | [SentinelFlow](https://github.com/MintKangaroo/SentinelFlow) | 탐지·승인·대응·검증 Control Plane | Versioned playbooks | `:3000` |
 | [ThreatGraph](https://github.com/MintKangaroo/ThreatGraph) | IOC·Evidence 기반 위협 그래프 | STIX ingestion | `:5173` |
+| [Caldera Lab](https://github.com/MintKangaroo/Caldera-Lab) | 격리형 LLM/RL 에이전트 실행 연구 | Isolated AI/RL planner | CLI · Docker |
 
 ```mermaid
 flowchart LR
@@ -45,7 +47,8 @@ flowchart LR
     subgraph Validation["Validation & Research"]
         AP["AutoPentest AI<br/>Authorized validation"]
         AS["AIShield<br/>Model robustness"]
-        RL["RLAttack<br/>Simulation research"]
+    RL["RLAttack<br/>Simulation research"]
+    CL["Caldera Lab<br/>LLM · RL emulation"]
     end
 
     TG -->|"correlated evidence"| SF
@@ -54,6 +57,7 @@ flowchart LR
     SF -->|"security validation"| AP
     SF -->|"robustness validation"| AS
     RL -.->|"reproducible strategy research"| RM
+    CL -.->|"isolated agent execution"| SF
 
     Dashboard -.->|"Git · health · jobs"| TG
     Dashboard -.->|"Git · tests"| RM
@@ -61,11 +65,12 @@ flowchart LR
     Dashboard -.->|"health · lifecycle"| AP
     Dashboard -.->|"health · lifecycle"| AS
     Dashboard -.->|"health · managed process"| RL
+    Dashboard -.->|"tests · lab workflow"| CL
 ```
 
 ## 제공 기능
 
-- 6개 프로젝트의 현재 브랜치, 수정/미추적 파일, upstream 차이, 최근 커밋 수집
+- 7개 프로젝트의 현재 브랜치, 수정/미추적 파일, upstream 차이, 최근 커밋 수집
 - 등록된 health endpoint의 온라인, 오프라인, 다른 서비스 점유 상태 확인
 - 프로젝트명, 스택, 브랜치 검색과 변경/실행 상태 필터
 - 기본 포트를 공유하는 프로젝트의 동시 실행 충돌 경고
@@ -81,7 +86,7 @@ flowchart LR
 
 | 영역 | 상태 | 확인 내용 |
 | --- | --- | --- |
-| 6개 프로젝트 통합 | 완료 | Git·health·포트·실행 명령을 단일 설정으로 관리 |
+| 7개 프로젝트 통합 | 완료 | Git·health·포트·실행 명령을 단일 설정으로 관리 |
 | 작업 제어 | 완료 | 비동기 시작·중지·테스트, 중복 실행 차단, 관리형 서비스 종료 |
 | 작업 이력 | 완료 | `.runtime/jobs.json`에 저장하고 재시작 중 작업은 `interrupted`로 표시 |
 | 시각화 | 완료 | 반응형 대시보드, 프로젝트 검색/필터, Mermaid 구조도, README 스크린샷 |

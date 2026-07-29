@@ -123,6 +123,24 @@
         "stop": ["docker", "compose", "down"],
         "test": ["make", "test"]
       }
+    },
+    {
+      "id": "caldera-lab",
+      "name": "Caldera Lab",
+      "short_name": "CL",
+      "path": "Caldera_Lab",
+      "github": "https://github.com/MintKangaroo/Caldera-Lab",
+      "description": "격리 Docker 랩에서 LLM planner와 RL policy로 제한된 에이전트 실행을 연구하는 CALDERA 스타일 플랫폼",
+      "category": "Adversary Emulation",
+      "stage": "Isolated AI/RL planner",
+      "accent": "#ffb86b",
+      "stack": ["Python", "Docker", "LLM", "Tabular RL"],
+      "ports": [],
+      "app_url": null,
+      "health_url": null,
+      "actions": {
+        "test": ["make", "test"]
+      }
     }
   ]
 }
