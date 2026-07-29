@@ -51,6 +51,7 @@ const jobStatusLabels = {
   succeeded: "완료",
   failed: "실패",
   timed_out: "시간 초과",
+  interrupted: "재시작으로 중단됨",
   stopped: "중지됨",
   canceled: "취소됨",
 };

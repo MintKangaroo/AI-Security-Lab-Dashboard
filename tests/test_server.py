@@ -230,3 +230,53 @@ def test_job_manager_starts_and_stops_managed_service(tmp_path: Path) -> None:
         assert "Stopping managed service" in (manager.read_log(stop_job.id) or "")
     finally:
         manager.shutdown()
+
+
+def test_job_history_survives_manager_restart(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    manager = JobManager(runtime_root=runtime_root)
+    job = manager.submit(
+        "sample",
+        "Sample",
+        "test",
+        [sys.executable, "-c", "print('persisted')"],
+        tmp_path,
+    )
+    _wait_for(lambda: manager.get(job.id).status == "succeeded")
+    manager.shutdown()
+
+    restored = JobManager(runtime_root=runtime_root)
+    try:
+        loaded = restored.get(job.id)
+        assert loaded is not None
+        assert loaded.status == "succeeded"
+        assert loaded.project_id == "sample"
+    finally:
+        restored.shutdown()
+
+
+def test_running_history_is_marked_interrupted_on_restart(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    manager = JobManager(runtime_root=runtime_root)
+    job = manager.submit(
+        "sample",
+        "Sample",
+        "test",
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        tmp_path,
+    )
+    _wait_for(lambda: manager.get(job.id).status == "running")
+    manager.shutdown()
+    record = job.public()
+    record["status"] = "running"
+    record["finished_at"] = None
+    (runtime_root / "jobs.json").write_text(json.dumps([record]), encoding="utf-8")
+
+    restored = JobManager(runtime_root=runtime_root)
+    try:
+        loaded = restored.get(job.id)
+        assert loaded is not None
+        assert loaded.status == "interrupted"
+        assert loaded.finished_at is not None
+    finally:
+        restored.shutdown()

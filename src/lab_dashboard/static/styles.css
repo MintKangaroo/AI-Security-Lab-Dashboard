@@ -1336,6 +1336,10 @@ kbd {
   background: var(--coral);
 }
 
+.job-dot.interrupted {
+  background: var(--amber);
+}
+
 .activity-item strong {
   display: block;
   overflow: hidden;

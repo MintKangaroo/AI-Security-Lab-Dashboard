@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -168,8 +169,9 @@ class JobManager:
     def __init__(self, runtime_root: Path = RUNTIME_ROOT) -> None:
         self.runtime_root = runtime_root
         self.runtime_root.mkdir(parents=True, exist_ok=True)
+        self.history_path = self.runtime_root / "jobs.json"
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="lab-job")
-        self._jobs: dict[str, Job] = {}
+        self._jobs: dict[str, Job] = self._load_history()
         self._active_projects: dict[str, str] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._managed_projects: dict[str, str] = {}
@@ -177,6 +179,71 @@ class JobManager:
         self._stop_requested: set[str] = set()
         self._lock = threading.Lock()
         self._closed = False
+
+    def _load_history(self) -> dict[str, Job]:
+        if not self.history_path.is_file():
+            return {}
+        try:
+            records = json.loads(self.history_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(records, list):
+            return {}
+        jobs: dict[str, Job] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            required = ("id", "project_id", "project_name", "action")
+            if not all(isinstance(record.get(key), str) and record[key] for key in required):
+                continue
+            status = record.get("status")
+            if not isinstance(status, str):
+                continue
+            if status in {"queued", "running"}:
+                status = "interrupted"
+            job = Job(
+                id=record["id"],
+                project_id=record["project_id"],
+                project_name=record["project_name"],
+                action=record["action"],
+                command=["dashboard", "historical-job"],
+                kind=record.get("kind", "task") if isinstance(record.get("kind"), str) else "task",
+                status=status,
+                created_at=record.get("created_at", utc_now()),
+                started_at=record.get("started_at"),
+                finished_at=(
+                    record.get("finished_at") or (utc_now() if status == "interrupted" else None)
+                ),
+                exit_code=(
+                    record.get("exit_code")
+                    if isinstance(record.get("exit_code"), int)
+                    else None
+                ),
+                log_path=str(self.runtime_root / f"{record['id']}.log"),
+            )
+            jobs[job.id] = job
+        return jobs
+
+    def _persist_locked(self) -> None:
+        payload = [job.public() for job in self._jobs.values()]
+        temporary_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.runtime_root,
+                prefix="jobs-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = handle.name
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temporary_path, self.history_path)
+        except OSError:
+            if temporary_path:
+                with suppress(OSError):
+                    Path(temporary_path).unlink()
 
     def submit(
         self,
@@ -206,6 +273,7 @@ class JobManager:
             self._active_projects[project_id] = job.id
             if managed:
                 self._process_ready[project_id] = threading.Event()
+            self._persist_locked()
         self._executor.submit(self._execute, job, cwd)
         return job
 
@@ -269,6 +337,7 @@ class JobManager:
             if ready_event:
                 ready_event.set()
             self._stop_requested.discard(job.id)
+            self._persist_locked()
 
     @staticmethod
     def _terminate_process(process: subprocess.Popen[str], grace_seconds: float = 5.0) -> None:
@@ -326,6 +395,7 @@ class JobManager:
             )
             job.log_path = str(self.runtime_root / f"{job.id}.log")
             self._jobs[job.id] = job
+            self._persist_locked()
         self._executor.submit(self._execute_managed_stop, job, process)
         return job
 
@@ -353,6 +423,7 @@ class JobManager:
             job.status = status
             job.exit_code = exit_code
             job.finished_at = utc_now()
+            self._persist_locked()
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -392,6 +463,7 @@ class JobManager:
                 if job.status == "queued":
                     job.status = "canceled"
                     job.finished_at = utc_now()
+            self._persist_locked()
         for _job_id, process in processes:
             self._terminate_process(process)
         self._executor.shutdown(wait=True, cancel_futures=True)
