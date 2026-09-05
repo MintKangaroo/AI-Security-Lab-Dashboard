@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -18,9 +19,12 @@ import pytest
 from lab_dashboard.server import (
     ACCENT_PATTERN,
     DEFAULT_CONFIG,
+    MAX_JOB_HISTORY,
     MAX_STATUS_METRICS,
+    RUNTIME_ENV_VAR,
     STATUS_SCHEMA,
     Dashboard,
+    Job,
     JobConflictError,
     JobManager,
     _safe_project_path,
@@ -28,6 +32,7 @@ from lab_dashboard.server import (
     create_server,
     git_status,
     read_status,
+    resolve_runtime_root,
 )
 
 
@@ -812,4 +817,156 @@ def test_check_health_reports_a_refusing_endpoint_as_offline() -> None:
     with _health_endpoint("{}") as url:
         pass  # The server is closed on exit, so the port now refuses connections.
     assert check_health(url, None) == {"state": "offline", "latency_ms": None, "url": url}
+
+
+def _finished_job(index: int) -> Job:
+    return Job(
+        id=f"job{index:04d}",
+        project_id="alpha",
+        project_name="Alpha",
+        action="test",
+        command=["dashboard", "historical-job"],
+        status="succeeded",
+        created_at=f"2026-01-01T00:00:{index:02d}Z",
+        started_at=f"2026-01-01T00:00:{index:02d}Z",
+        finished_at=f"2026-01-01T00:00:{index:02d}Z",
+        exit_code=0,
+    )
+
+
+def _seed_history(manager: JobManager, jobs: list[Job]) -> None:
+    for job in jobs:
+        job.log_path = str(manager.runtime_root / f"{job.id}.log")
+        Path(job.log_path).write_text(f"log for {job.id}\n", encoding="utf-8")
+        manager._jobs[job.id] = job
+    with manager._lock:
+        manager._persist_locked()
+
+
+def test_job_history_is_capped_and_evicted_logs_are_deleted(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    manager = JobManager(runtime_root=runtime_root)
+    overflow = 10
+    try:
+        _seed_history(manager, [_finished_job(i) for i in range(MAX_JOB_HISTORY + overflow)])
+        assert len(manager.list()) == MAX_JOB_HISTORY
+        records = json.loads((runtime_root / "jobs.json").read_text(encoding="utf-8"))
+        assert len(records) == MAX_JOB_HISTORY
+
+        surviving = {record["id"] for record in records}
+        assert f"job{MAX_JOB_HISTORY + overflow - 1:04d}" in surviving
+        assert "job0000" not in surviving
+        assert {path.stem for path in runtime_root.glob("*.log")} == surviving
+    finally:
+        manager.shutdown()
+
+
+def test_pruning_keeps_an_unfinished_job_even_when_it_is_the_oldest(tmp_path: Path) -> None:
+    """Dropping a running job would strand its process with no record of it."""
+    runtime_root = tmp_path / "runtime"
+    manager = JobManager(runtime_root=runtime_root)
+    running = _finished_job(0)
+    running.status = "running"
+    running.finished_at = None
+    try:
+        _seed_history(manager, [running, *(_finished_job(i) for i in range(1, 80))])
+        assert manager.get(running.id) is not None
+        assert (runtime_root / f"{running.id}.log").is_file()
+        listed = manager.list()
+        assert len(listed) == MAX_JOB_HISTORY
+        # It is the oldest job of the lot, so a plain newest-first cut would
+        # drop it and the browser would stop polling for job updates.
+        assert running.id in {job["id"] for job in listed}
+    finally:
+        manager.shutdown()
+
+
+def test_a_restart_drops_history_beyond_the_cap(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    first = JobManager(runtime_root=runtime_root)
+    _seed_history(first, [_finished_job(i) for i in range(MAX_JOB_HISTORY)])
+    first.shutdown()
+    # A history file written by an older build, before the cap existed.
+    (runtime_root / "jobs.json").write_text(
+        json.dumps([asdict(_finished_job(i)) for i in range(MAX_JOB_HISTORY + 25)]),
+        encoding="utf-8",
+    )
+
+    second = JobManager(runtime_root=runtime_root)
+    try:
+        assert len(second.list()) == MAX_JOB_HISTORY
+        assert second.get("job0000") is None
+        assert second.get(f"job{MAX_JOB_HISTORY + 24:04d}") is not None
+    finally:
+        second.shutdown()
+
+
+def test_a_restart_removes_a_log_no_retained_job_points_at(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    first = JobManager(runtime_root=runtime_root)
+    _seed_history(first, [_finished_job(0)])
+    first.shutdown()
+    orphan = runtime_root / "deadbeef1234.log"
+    orphan.write_text("left over\n", encoding="utf-8")
+
+    second = JobManager(runtime_root=runtime_root)
+    try:
+        assert not orphan.exists()
+        assert (runtime_root / "job0000.log").is_file()
+    finally:
+        second.shutdown()
+
+
+def test_runtime_root_prefers_an_explicit_path(tmp_path: Path) -> None:
+    assert resolve_runtime_root(tmp_path / "chosen") == tmp_path / "chosen"
+
+
+def test_runtime_root_honours_the_environment_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNTIME_ENV_VAR, str(tmp_path / "from-env"))
+    assert resolve_runtime_root() == tmp_path / "from-env"
+
+
+def test_runtime_root_uses_the_checkout_it_is_running_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(RUNTIME_ENV_VAR, raising=False)
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr("lab_dashboard.server.REPO_ROOT", tmp_path)
+    assert resolve_runtime_root() == tmp_path / ".runtime"
+
+
+def test_runtime_root_avoids_the_install_directory_outside_a_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installed as a console script, REPO_ROOT is whatever sits above
+    site-packages -- usually the virtualenv, which is no place for state."""
+    monkeypatch.delenv(RUNTIME_ENV_VAR, raising=False)
+    site_packages_parent = tmp_path / "venv" / "lib"
+    site_packages_parent.mkdir(parents=True)
+    monkeypatch.setattr("lab_dashboard.server.REPO_ROOT", site_packages_parent)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    resolved = resolve_runtime_root()
+    assert resolved == tmp_path / "state" / "ai-security-lab-dashboard"
+    assert site_packages_parent not in resolved.parents
+
+
+def test_dashboard_hands_its_runtime_root_to_the_job_manager(tmp_path: Path) -> None:
+    lab_root = tmp_path / "lab"
+    (lab_root / "sample").mkdir(parents=True)
+    config_path = tmp_path / "projects.json"
+    config_path.write_text(
+        json.dumps({"projects": [{"id": "sample", "name": "S", "path": "sample", "ports": []}]}),
+        encoding="utf-8",
+    )
+    dashboard = Dashboard(
+        config_path=config_path, lab_root=lab_root, runtime_root=tmp_path / "runtime"
+    )
+    try:
+        assert dashboard.jobs.runtime_root == tmp_path / "runtime"
+        assert (tmp_path / "runtime").is_dir()
+    finally:
+        dashboard.close()
 

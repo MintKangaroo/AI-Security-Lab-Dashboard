@@ -25,15 +25,37 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_ROOT.parents[1]
 STATIC_ROOT = PACKAGE_ROOT / "static"
 DEFAULT_CONFIG = PACKAGE_ROOT / "config" / "projects.json"
-RUNTIME_ROOT = REPO_ROOT / ".runtime"
+RUNTIME_ENV_VAR = "AI_SECURITY_LAB_DASHBOARD_RUNTIME"
 MUTATION_HEADER = "X-Lab-Dashboard"
 MAX_BODY_SIZE = 32_768
 STATUS_SCHEMA = "lab-status/1"
 STATUS_STATES = frozenset({"ok", "warn", "error", "unknown"})
 MAX_STATUS_BYTES = 64_000
 MAX_STATUS_METRICS = 12
+MAX_JOB_HISTORY = 50
+ACTIVE_JOB_STATES = frozenset({"queued", "running"})
 ACCENT_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def resolve_runtime_root(explicit: Path | None = None) -> Path:
+    """Decide where job history and logs are written.
+
+    In a source checkout that is the repo's own `.runtime/`. Installed as a
+    console script the package lives in site-packages, so REPO_ROOT points at
+    whatever directory happens to sit above it -- usually the virtualenv -- and
+    state would be written there. The marker file is what tells the two apart;
+    outside a checkout the state lands in the user's XDG state directory.
+    """
+    if explicit is not None:
+        return explicit.expanduser()
+    override = os.getenv(RUNTIME_ENV_VAR)
+    if override:
+        return Path(override).expanduser()
+    if (REPO_ROOT / "pyproject.toml").is_file():
+        return REPO_ROOT / ".runtime"
+    state_home = os.getenv("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(state_home) / "ai-security-lab-dashboard"
 
 
 def utc_now() -> str:
@@ -241,8 +263,8 @@ class JobConflictError(RuntimeError):
 
 
 class JobManager:
-    def __init__(self, runtime_root: Path = RUNTIME_ROOT) -> None:
-        self.runtime_root = runtime_root
+    def __init__(self, runtime_root: Path | None = None) -> None:
+        self.runtime_root = resolve_runtime_root(runtime_root)
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.history_path = self.runtime_root / "jobs.json"
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="lab-job")
@@ -254,6 +276,7 @@ class JobManager:
         self._stop_requested: set[str] = set()
         self._lock = threading.Lock()
         self._closed = False
+        self._remove_orphan_logs()
 
     def _load_history(self) -> dict[str, Job]:
         if not self.history_path.is_file():
@@ -265,16 +288,18 @@ class JobManager:
         if not isinstance(records, list):
             return {}
         jobs: dict[str, Job] = {}
-        for record in records:
-            if not isinstance(record, dict):
-                continue
+        for record in sorted(
+            (record for record in records if isinstance(record, dict)),
+            key=lambda record: record.get("created_at") or "",
+            reverse=True,
+        )[:MAX_JOB_HISTORY]:
             required = ("id", "project_id", "project_name", "action")
             if not all(isinstance(record.get(key), str) and record[key] for key in required):
                 continue
             status = record.get("status")
             if not isinstance(status, str):
                 continue
-            if status in {"queued", "running"}:
+            if status in ACTIVE_JOB_STATES:
                 status = "interrupted"
             job = Job(
                 id=record["id"],
@@ -299,7 +324,44 @@ class JobManager:
             jobs[job.id] = job
         return jobs
 
+    def _prune_locked(self) -> None:
+        """Keep the job history bounded, logs included.
+
+        Only the newest MAX_JOB_HISTORY finished jobs are worth keeping -- the
+        UI never shows more -- but an unfinished job is retained regardless of
+        age, because dropping it would strand its running process without a
+        record. Evicting a job deletes its log too; otherwise the history file
+        stays small while .runtime/ grows without limit.
+        """
+        finished = [job for job in self._jobs.values() if job.status not in ACTIVE_JOB_STATES]
+        if len(finished) <= MAX_JOB_HISTORY:
+            return
+        finished.sort(key=lambda job: job.created_at, reverse=True)
+        for job in finished[MAX_JOB_HISTORY:]:
+            self._jobs.pop(job.id, None)
+            self._delete_log(job)
+
+    def _delete_log(self, job: Job) -> None:
+        path = Path(job.log_path) if job.log_path else self.runtime_root / f"{job.id}.log"
+        with suppress(OSError):
+            path.unlink()
+
+    def _remove_orphan_logs(self) -> None:
+        """Drop logs no retained job points at.
+
+        Runs once at startup, after the history has been loaded and capped, so
+        it also collects the logs of records the cap dropped, plus anything left
+        behind by a history file that was truncated or lost.
+        """
+        known = {f"{job_id}.log" for job_id in self._jobs}
+        with suppress(OSError):
+            for path in self.runtime_root.glob("*.log"):
+                if path.name not in known:
+                    with suppress(OSError):
+                        path.unlink()
+
     def _persist_locked(self) -> None:
+        self._prune_locked()
         payload = [job.public() for job in self._jobs.values()]
         temporary_path: str | None = None
         try:
@@ -501,9 +563,20 @@ class JobManager:
             self._persist_locked()
 
     def list(self) -> list[dict[str, Any]]:
+        """The newest jobs, with every unfinished one guaranteed a place.
+
+        A long-running service is older than the tasks that follow it, so a
+        plain newest-first cut can drop it -- and the browser stops polling for
+        job updates the moment nothing running is listed.
+        """
         with self._lock:
-            jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
-            return [job.public() for job in jobs[:50]]
+            jobs = list(self._jobs.values())
+        active = [job for job in jobs if job.status in ACTIVE_JOB_STATES]
+        finished = [job for job in jobs if job.status not in ACTIVE_JOB_STATES]
+        finished.sort(key=lambda item: item.created_at, reverse=True)
+        selected = active + finished[: max(0, MAX_JOB_HISTORY - len(active))]
+        selected.sort(key=lambda item: item.created_at, reverse=True)
+        return [job.public() for job in selected]
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
@@ -550,6 +623,7 @@ class Dashboard:
         config_path: Path = DEFAULT_CONFIG,
         lab_root: Path | None = None,
         jobs: JobManager | None = None,
+        runtime_root: Path | None = None,
     ) -> None:
         self.config_path = config_path.resolve()
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -562,7 +636,7 @@ class Dashboard:
         self.lab_root = lab_root.resolve()
         self.projects = config["projects"]
         self.project_map = {project["id"]: project for project in self.projects}
-        self.jobs = jobs or JobManager()
+        self.jobs = jobs or JobManager(runtime_root)
         self._validate()
 
     def _validate(self) -> None:
@@ -913,12 +987,19 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=4173, help="Bind port (default: 4173)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Project config JSON")
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help=f"Job history and logs directory (env: {RUNTIME_ENV_VAR})",
+    )
     args = parser.parse_args()
 
-    dashboard = Dashboard(config_path=args.config)
+    dashboard = Dashboard(config_path=args.config, runtime_root=args.runtime_root)
     server = create_server(args.host, args.port, dashboard)
     print(f"AI Security Lab Dashboard: http://{args.host}:{args.port}")
     print(f"Lab root: {dashboard.lab_root}")
+    print(f"Runtime root: {dashboard.jobs.runtime_root}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

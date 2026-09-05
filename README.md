@@ -89,10 +89,10 @@ flowchart LR
 | --- | --- | --- |
 | 7개 프로젝트 통합 | 완료 | Git·health·포트·실행 명령을 단일 설정으로 관리 |
 | 작업 제어 | 완료 | 비동기 시작·중지·테스트, 중복 실행 차단, 관리형 서비스 종료 |
-| 작업 이력 | 완료 | `.runtime/jobs.json`에 저장하고 재시작 중 작업은 `interrupted`로 표시 |
+| 작업 이력 | 완료 | `.runtime/jobs.json`에 저장하고 재시작 중 작업은 `interrupted`로 표시, 최근 50건으로 자동 정리 |
 | 시각화 | 완료 | 반응형 대시보드, 프로젝트 검색/필터, Mermaid 구조도, README 스크린샷 |
 | 랩 telemetry | 완료 | 프로젝트가 게시한 `lab-status/1` 문서를 검증 후 카드·상세에 표시 |
-| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 65개 테스트, Ruff, 브라우저 JS 검사 |
+| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 74개 테스트, Ruff, 브라우저 JS 검사 |
 
 현재 남은 것은 배포 환경에 따른 운영 설정뿐입니다. 각 하위 프로젝트의 Docker 이미지,
 `.env` 값, 데이터베이스/Neo4j 같은 의존성은 해당 프로젝트에서 준비해야 하며, 이 대시보드는
@@ -226,6 +226,18 @@ AI_SECURITY_LAB_ROOT=/absolute/path/to/AI_Security_Lab lab-dashboard
 ```bash
 lab-dashboard --config ./my-projects.json
 ```
+
+작업 이력과 로그가 쌓이는 위치는 `--runtime-root` 또는
+`AI_SECURITY_LAB_DASHBOARD_RUNTIME`으로 지정합니다. 기본값은 저장소를 복제해 실행할 때는
+`.runtime/`이고, `pip install`로 설치해 `lab-dashboard` 명령으로 실행할 때는 가상환경이
+아니라 사용자 상태 디렉터리(`$XDG_STATE_HOME` 또는 `~/.local/state`)입니다.
+
+```bash
+lab-dashboard --runtime-root ~/.local/state/lab-dashboard
+```
+
+이력은 완료된 작업 최근 50건까지만 보관하고, 밀려난 작업의 로그 파일도 함께 지웁니다.
+아직 끝나지 않은 작업은 아무리 오래됐더라도 남기고 화면에도 계속 표시합니다.
 
 ## 안전 경계
 
