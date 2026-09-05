@@ -21,6 +21,7 @@ from lab_dashboard.server import (
     DEFAULT_CONFIG,
     MAX_JOB_HISTORY,
     MAX_STATUS_METRICS,
+    OVERVIEW_CACHE_SECONDS,
     RUNTIME_ENV_VAR,
     STATUS_SCHEMA,
     Dashboard,
@@ -970,3 +971,93 @@ def test_dashboard_hands_its_runtime_root_to_the_job_manager(tmp_path: Path) -> 
     finally:
         dashboard.close()
 
+
+def test_static_routes_serve_shipped_files_and_nothing_else(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    with _running_dashboard(dashboard) as base_url:
+        with urllib.request.urlopen(f"{base_url}/") as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "text/html; charset=utf-8"
+        with urllib.request.urlopen(f"{base_url}/styles.css") as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "text/css; charset=utf-8"
+        # No client-side router exists, so an unknown path is a 404 rather
+        # than a second copy of the front page.
+        for missing in ("/no-such-page", "/static/../server.py", "/index.html/extra"):
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(f"{base_url}{missing}")
+            assert error.value.code == 404, missing
+
+
+def test_overview_is_computed_once_per_cache_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every browser tab polls the overview while a job runs, and each build
+    forks git per project; callers inside the window share one build."""
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    builds = 0
+    original = dashboard._build_overview
+
+    def counting_build() -> dict:
+        nonlocal builds
+        builds += 1
+        return original()
+
+    monkeypatch.setattr(dashboard, "_build_overview", counting_build)
+    try:
+        first = dashboard.overview()
+        second = dashboard.overview()
+        assert builds == 1
+        assert second is first
+    finally:
+        dashboard.close()
+
+
+def test_submitting_a_job_invalidates_the_overview_cache(tmp_path: Path) -> None:
+    """The browser refetches right after it submits and expects to see the new
+    job on the project; a stale snapshot would leave the buttons enabled."""
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    try:
+        before = dashboard.overview()
+        assert before["projects"][0]["active_job"] is None
+        job = dashboard.run_action("alpha", "test")
+        after = dashboard.overview()
+        assert after is not before
+        assert after["projects"][0]["active_job"]["id"] == job.id
+        _wait_for(lambda: dashboard.jobs.get(job.id).status == "succeeded")
+    finally:
+        dashboard.close()
+
+
+def test_overview_cache_expires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    clock = [1000.0]
+    monkeypatch.setattr("lab_dashboard.server.time.monotonic", lambda: clock[0])
+    try:
+        first = dashboard.overview()
+        clock[0] += OVERVIEW_CACHE_SECONDS + 0.01
+        assert dashboard.overview() is not first
+    finally:
+        dashboard.close()
+
+
+def test_overview_passes_last_run_at_through(tmp_path: Path) -> None:
+    project = tmp_path / "lab" / "sample"
+    project.mkdir(parents=True)
+    (project / "status.json").write_text(
+        json.dumps(
+            {
+                "schema": STATUS_SCHEMA,
+                "state": "ok",
+                "headline": "ran",
+                "generated_at": "2026-01-02T00:00:00Z",
+                "last_run_at": "2026-01-01T00:00:00Z",
+                "metrics": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    status = read_status(project, "status.json")
+    assert status is not None
+    assert status["generated_at"] == "2026-01-02T00:00:00Z"
+    assert status["last_run_at"] == "2026-01-01T00:00:00Z"

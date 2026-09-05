@@ -8,6 +8,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -33,6 +34,7 @@ STATUS_STATES = frozenset({"ok", "warn", "error", "unknown"})
 MAX_STATUS_BYTES = 64_000
 MAX_STATUS_METRICS = 12
 MAX_JOB_HISTORY = 50
+OVERVIEW_CACHE_SECONDS = 1.0
 ACTIVE_JOB_STATES = frozenset({"queued", "running"})
 ACCENT_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -637,6 +639,8 @@ class Dashboard:
         self.projects = config["projects"]
         self.project_map = {project["id"]: project for project in self.projects}
         self.jobs = jobs or JobManager(runtime_root)
+        self._overview_lock = threading.Lock()
+        self._overview_cache: tuple[float, dict[str, Any]] | None = None
         self._validate()
 
     def _validate(self) -> None:
@@ -718,6 +722,30 @@ class Dashboard:
         return snapshot
 
     def overview(self) -> dict[str, Any]:
+        """The full portfolio snapshot, computed at most once per cache window.
+
+        Building it forks a handful of git processes per project and probes
+        every health endpoint, and the browser polls it every couple of seconds
+        while a job runs -- each open tab separately. The lock also makes
+        concurrent callers share one computation instead of each forking their
+        own. Anything that changes state the browser acts on right away (a job
+        being submitted) invalidates the cache, so what it can be stale about is
+        only a job finishing or a repository changing underneath, by at most
+        the window.
+        """
+        with self._overview_lock:
+            cached = self._overview_cache
+            if cached and time.monotonic() - cached[0] < OVERVIEW_CACHE_SECONDS:
+                return cached[1]
+            payload = self._build_overview()
+            self._overview_cache = (time.monotonic(), payload)
+            return payload
+
+    def _invalidate_overview(self) -> None:
+        with self._overview_lock:
+            self._overview_cache = None
+
+    def _build_overview(self) -> dict[str, Any]:
         snapshots: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=min(8, len(self.projects) or 1)) as executor:
             futures = {
@@ -767,7 +795,9 @@ class Dashboard:
         if not project:
             raise KeyError("project")
         if action == "stop" and project.get("managed_start"):
-            return self.jobs.stop_managed(project_id, project["name"])
+            job = self.jobs.stop_managed(project_id, project["name"])
+            self._invalidate_overview()
+            return job
         command = project.get("actions", {}).get(action)
         if not command:
             raise KeyError("action")
@@ -775,7 +805,7 @@ class Dashboard:
         if not project_path.is_dir():
             raise FileNotFoundError(project_path)
         managed = bool(project.get("managed_start") and action == "start")
-        return self.jobs.submit(
+        job = self.jobs.submit(
             project_id,
             project["name"],
             action,
@@ -783,6 +813,8 @@ class Dashboard:
             project_path,
             managed=managed,
         )
+        self._invalidate_overview()
+        return job
 
     def close(self) -> None:
         self.jobs.shutdown()
@@ -948,11 +980,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str) -> None:
         relative = "index.html" if path in {"", "/"} else path.lstrip("/")
         candidate = (STATIC_ROOT / relative).resolve()
-        if candidate != STATIC_ROOT and STATIC_ROOT not in candidate.parents:
+        # There is no client-side routing to fall back to index.html for; a
+        # path that is not a shipped file is simply missing.
+        if STATIC_ROOT not in candidate.parents or not candidate.is_file():
             self._error(HTTPStatus.NOT_FOUND, "파일을 찾을 수 없습니다.")
             return
-        if not candidate.is_file():
-            candidate = STATIC_ROOT / "index.html"
         suffix_types = {
             ".html": "text/html; charset=utf-8",
             ".css": "text/css; charset=utf-8",

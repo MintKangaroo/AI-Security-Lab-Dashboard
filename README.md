@@ -92,7 +92,7 @@ flowchart LR
 | 작업 이력 | 완료 | `.runtime/jobs.json`에 저장하고 재시작 중 작업은 `interrupted`로 표시, 최근 50건으로 자동 정리 |
 | 시각화 | 완료 | 반응형 대시보드, 프로젝트 검색/필터, Mermaid 구조도, README 스크린샷 |
 | 랩 telemetry | 완료 | 프로젝트가 게시한 `lab-status/1` 문서를 검증 후 카드·상세에 표시 |
-| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 74개 테스트, Ruff, 브라우저 JS 검사 |
+| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 79개 테스트, Ruff, 브라우저 JS 검사 |
 
 현재 남은 것은 배포 환경에 따른 운영 설정뿐입니다. 각 하위 프로젝트의 Docker 이미지,
 `.env` 값, 데이터베이스/Neo4j 같은 의존성은 해당 프로젝트에서 준비해야 하며, 이 대시보드는
@@ -195,9 +195,13 @@ health endpoint가 없는 프로젝트도 자기 작업 결과를 게시할 수 
   "generated_at": "2026-09-05T10:56:59Z",
   "state": "ok",
   "headline": "8/8 techniques covered",
+  "last_run_at": "2026-09-05T10:56:59Z",
   "metrics": [{ "label": "ATT&CK coverage", "value": "8/8" }]
 }
 ```
+
+`generated_at`은 문서를 쓴 시각, `last_run_at`은 랩이 실제로 마지막으로 실행된 시각입니다.
+실행 없이 상태만 다시 생성하면 둘이 벌어지므로 상세 패널에 둘 다 표시합니다.
 
 ### 강조색
 

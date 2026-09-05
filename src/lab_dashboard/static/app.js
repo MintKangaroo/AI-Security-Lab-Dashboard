@@ -202,8 +202,14 @@ function labStatusSection(status) {
       `,
     )
     .join("");
-  const stamp = status.generated_at
-    ? `<small class="lab-status-stamp">${relativeTime(status.generated_at)} 기록</small>`
+  // generated_at is when the document was written; last_run_at is when the
+  // lab itself last ran. They drift apart when a project regenerates its
+  // status without running, so both are shown when both are present.
+  const stamps = [];
+  if (status.generated_at) stamps.push(`${relativeTime(status.generated_at)} 기록`);
+  if (status.last_run_at) stamps.push(`마지막 실행 ${relativeTime(status.last_run_at)}`);
+  const stamp = stamps.length
+    ? `<small class="lab-status-stamp">${stamps.join(" · ")}</small>`
     : "";
   return `
     <section class="drawer-section">
