@@ -7,8 +7,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +24,7 @@ from lab_dashboard.server import (
     JobConflictError,
     JobManager,
     _safe_project_path,
+    check_health,
     create_server,
     git_status,
     read_status,
@@ -537,3 +541,275 @@ def test_dashboard_rejects_a_project_id_it_cannot_put_in_a_selector(
             lab_root=lab_root,
             jobs=JobManager(runtime_root=tmp_path / "runtime"),
         )
+
+
+def _bulk_dashboard(
+    tmp_path: Path, *, project_ids: tuple[str, ...] = ("alpha", "beta")
+) -> Dashboard:
+    lab_root = tmp_path / "lab"
+    projects = []
+    for project_id in project_ids:
+        (lab_root / project_id).mkdir(parents=True)
+        projects.append(
+            {
+                "id": project_id,
+                "name": project_id.title(),
+                "path": project_id,
+                "ports": [],
+                "actions": {"test": [sys.executable, "-c", "print('ok')"]},
+            }
+        )
+    config_path = tmp_path / "projects.json"
+    config_path.write_text(json.dumps({"projects": projects}), encoding="utf-8")
+    return Dashboard(
+        config_path=config_path,
+        lab_root=lab_root,
+        jobs=JobManager(runtime_root=tmp_path / "runtime"),
+    )
+
+
+@contextmanager
+def _running_dashboard(dashboard: Dashboard) -> Iterator[str]:
+    server = create_server("127.0.0.1", 0, dashboard)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        dashboard.close()
+
+
+def _post(
+    url: str,
+    payload: dict[str, object] | None,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload if payload is not None else {}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Lab-Dashboard": "1",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        return error.code, json.load(error)
+
+
+def test_bulk_action_queues_a_job_for_every_selected_project(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path)
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/actions/bulk",
+            {"project_ids": ["alpha", "beta"], "action": "test"},
+        )
+        assert status == 202
+        assert {job["project_id"] for job in body["jobs"]} == {"alpha", "beta"}
+        assert body["skipped"] == []
+        assert body["conflicts"] == []
+        assert all("log_path" not in job and "command" not in job for job in body["jobs"])
+        for job in body["jobs"]:
+            _wait_for(lambda job_id=job["id"]: dashboard.jobs.get(job_id).status == "succeeded")
+
+
+def test_bulk_action_runs_a_repeated_project_once(tmp_path: Path) -> None:
+    """The same id twice is a selection artefact, not a request for two runs --
+    and the second submit would collide with the first on the project lock."""
+    dashboard = _bulk_dashboard(tmp_path)
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/actions/bulk",
+            {"project_ids": ["alpha", "alpha"], "action": "test"},
+        )
+        assert status == 202
+        assert len(body["jobs"]) == 1
+        assert body["conflicts"] == []
+        _wait_for(lambda: dashboard.jobs.get(body["jobs"][0]["id"]).status == "succeeded")
+
+
+def test_bulk_action_separates_skipped_projects_from_the_jobs_it_started(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path)
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/actions/bulk",
+            {"project_ids": ["alpha", "ghost"], "action": "test"},
+        )
+        assert status == 202
+        assert [job["project_id"] for job in body["jobs"]] == ["alpha"]
+        assert body["skipped"] == ["ghost"]
+        _wait_for(lambda: dashboard.jobs.get(body["jobs"][0]["id"]).status == "succeeded")
+
+
+def test_bulk_action_skips_a_project_whose_directory_is_missing(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path)
+    (tmp_path / "lab" / "beta").rmdir()
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/actions/bulk",
+            {"project_ids": ["alpha", "beta"], "action": "test"},
+        )
+        assert status == 202
+        assert [job["project_id"] for job in body["jobs"]] == ["alpha"]
+        assert body["skipped"] == ["beta"]
+        _wait_for(lambda: dashboard.jobs.get(body["jobs"][0]["id"]).status == "succeeded")
+
+
+def test_bulk_action_reports_a_busy_project_as_a_conflict(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path)
+    blocker = dashboard.jobs.submit(
+        "beta",
+        "Beta",
+        "test",
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        tmp_path / "lab" / "beta",
+    )
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/actions/bulk",
+            {"project_ids": ["alpha", "beta"], "action": "test"},
+        )
+        assert status == 202
+        assert [job["project_id"] for job in body["jobs"]] == ["alpha"]
+        assert [conflict["project_id"] for conflict in body["conflicts"]] == ["beta"]
+        assert body["conflicts"][0]["reason"]
+        assert dashboard.jobs.get(blocker.id).status == "running"
+
+
+def test_bulk_action_fails_when_no_project_can_run(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path)
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/actions/bulk",
+            {"project_ids": ["ghost", "phantom"], "action": "test"},
+        )
+        assert status == 409
+        assert body["error"]
+        assert dashboard.jobs.list() == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "test"},
+        {"project_ids": [], "action": "test"},
+        {"project_ids": "alpha", "action": "test"},
+        {"project_ids": ["alpha", 7], "action": "test"},
+        {"project_ids": ["alpha", "beta", "gamma"], "action": "test"},
+        {"project_ids": ["alpha"], "action": "deploy"},
+        {"project_ids": ["alpha"]},
+    ],
+)
+def test_bulk_action_rejects_a_malformed_payload(tmp_path: Path, payload: dict) -> None:
+    dashboard = _bulk_dashboard(tmp_path)
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(f"{base_url}/api/actions/bulk", payload)
+        assert status == 400
+        assert body["error"]
+        assert dashboard.jobs.list() == []
+
+
+@pytest.mark.parametrize("origin", ["http://127.0.0.1:4173", "http://localhost:4173"])
+def test_mutation_is_accepted_from_the_local_dashboard_origin(tmp_path: Path, origin: str) -> None:
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/projects/alpha/actions/test",
+            {},
+            headers={"Origin": origin},
+        )
+        assert status == 202
+        _wait_for(lambda: dashboard.jobs.get(body["job"]["id"]).status == "succeeded")
+
+
+@pytest.mark.parametrize(
+    "origin", ["http://evil.example", "https://127.0.0.1.evil.example", "null"]
+)
+def test_mutation_is_rejected_from_a_foreign_origin(tmp_path: Path, origin: str) -> None:
+    """The custom header alone cannot be forged cross-origin, but a browser that
+    does send one has to carry an Origin the dashboard recognises."""
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    with _running_dashboard(dashboard) as base_url:
+        status, body = _post(
+            f"{base_url}/api/projects/alpha/actions/test",
+            {},
+            headers={"Origin": origin},
+        )
+        assert status == 403
+        assert body["error"]
+        assert dashboard.jobs.list() == []
+
+
+def test_mutation_is_rejected_without_the_dashboard_header(tmp_path: Path) -> None:
+    dashboard = _bulk_dashboard(tmp_path, project_ids=("alpha",))
+    with _running_dashboard(dashboard) as base_url:
+        request = urllib.request.Request(
+            f"{base_url}/api/actions/bulk",
+            data=b'{"project_ids": ["alpha"], "action": "test"}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        assert error.value.code == 403
+        assert dashboard.jobs.list() == []
+
+
+@contextmanager
+def _health_endpoint(body: str, status: int = 200) -> Iterator[str]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            encoded = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/health"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_check_health_reports_a_project_without_an_endpoint() -> None:
+    assert check_health(None, None) == {"state": "not_configured", "latency_ms": None, "url": None}
+
+
+def test_check_health_reports_a_responding_endpoint() -> None:
+    with _health_endpoint('{"service": "alpha", "status": "live"}') as url:
+        result = check_health(url, "alpha")
+    assert result["state"] == "online"
+    assert result["url"] == url
+    assert isinstance(result["latency_ms"], int)
+
+
+def test_check_health_flags_a_port_held_by_another_service() -> None:
+    """A neighbouring project on the same port answers 200; the marker string is
+    what separates 'my service is up' from 'something else owns this port'."""
+    with _health_endpoint('{"service": "someone-else"}') as url:
+        result = check_health(url, "alpha")
+    assert result["state"] == "occupied"
+
+
+def test_check_health_reports_a_refusing_endpoint_as_offline() -> None:
+    with _health_endpoint("{}") as url:
+        pass  # The server is closed on exit, so the port now refuses connections.
+    assert check_health(url, None) == {"state": "offline", "latency_ms": None, "url": url}
+

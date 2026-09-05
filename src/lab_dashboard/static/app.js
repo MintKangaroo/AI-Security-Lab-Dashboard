@@ -79,10 +79,14 @@ function renderIcons(root = document) {
   });
 }
 
+// Returns HTML-safe text: every branch is either a literal or escaped. Call
+// sites interpolate the result into innerHTML templates, and the timestamps it
+// formats include ones a project wrote into its own status file, so the
+// unparseable-input branch must not hand raw markup back.
 function relativeTime(value) {
   if (!value) return "기록 없음";
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  if (Number.isNaN(date.getTime())) return escapeHTML(value);
   const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
   if (seconds < 60) return "방금 전";
   if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
