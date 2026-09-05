@@ -13,12 +13,15 @@ from pathlib import Path
 import pytest
 
 from lab_dashboard.server import (
+    MAX_STATUS_METRICS,
+    STATUS_SCHEMA,
     Dashboard,
     JobConflictError,
     JobManager,
     _safe_project_path,
     create_server,
     git_status,
+    read_status,
 )
 
 
@@ -280,3 +283,145 @@ def test_running_history_is_marked_interrupted_on_restart(tmp_path: Path) -> Non
         assert loaded.finished_at is not None
     finally:
         restored.shutdown()
+
+
+def _write_status(project: Path, document: object) -> None:
+    path = project / ".runtime" / "status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _status_document(**overrides: object) -> dict[str, object]:
+    document = {
+        "schema": STATUS_SCHEMA,
+        "generated_at": "2026-01-01T00:00:00Z",
+        "state": "ok",
+        "headline": "8/8 techniques covered",
+        "last_run_at": "2026-01-01T00:00:00Z",
+        "metrics": [{"label": "runs", "value": "3"}],
+    }
+    document.update(overrides)
+    return document
+
+
+def test_read_status_returns_none_without_a_configured_file(tmp_path: Path) -> None:
+    assert read_status(tmp_path, None) is None
+
+
+def test_read_status_reads_a_published_document(tmp_path: Path) -> None:
+    _write_status(tmp_path, _status_document())
+    status = read_status(tmp_path, ".runtime/status.json")
+    assert status["state"] == "ok"
+    assert status["metrics"] == [{"label": "runs", "value": "3"}]
+
+
+def test_read_status_reports_a_project_that_never_ran(tmp_path: Path) -> None:
+    status = read_status(tmp_path, ".runtime/status.json")
+    assert status["state"] == "unknown"
+    assert status["metrics"] == []
+
+
+@pytest.mark.parametrize("relative", ["../outside.json", "/etc/passwd", "."])
+def test_read_status_refuses_a_path_outside_the_project(tmp_path: Path, relative: str) -> None:
+    status = read_status(tmp_path, relative)
+    assert status["state"] == "error"
+    assert "inside the project" in status["headline"]
+
+
+def test_read_status_refuses_a_symlink_that_escapes_the_project(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / ".runtime").mkdir(parents=True)
+    secret = tmp_path / "secret.json"
+    secret.write_text(json.dumps(_status_document()), encoding="utf-8")
+    (project / ".runtime" / "status.json").symlink_to(secret)
+    assert read_status(project, ".runtime/status.json")["state"] == "error"
+
+
+def test_read_status_rejects_an_unknown_schema(tmp_path: Path) -> None:
+    _write_status(tmp_path, _status_document(schema="something-else/9"))
+    status = read_status(tmp_path, ".runtime/status.json")
+    assert status["state"] == "error"
+    assert STATUS_SCHEMA in status["headline"]
+
+
+@pytest.mark.parametrize("payload", ["not json at all", '["a list"]'])
+def test_read_status_survives_a_corrupt_file(tmp_path: Path, payload: str) -> None:
+    path = tmp_path / ".runtime" / "status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+    assert read_status(tmp_path, ".runtime/status.json")["state"] == "error"
+
+
+def test_read_status_treats_the_document_as_untrusted(tmp_path: Path) -> None:
+    """A project writes this file itself, so nothing in it is taken on faith."""
+    _write_status(
+        tmp_path,
+        _status_document(
+            state="catastrophic",
+            headline="h" * 500,
+            metrics=[{"label": "l" * 200, "value": "v" * 200}]
+            + [{"label": f"m{index}", "value": "1"} for index in range(50)]
+            + ["not a metric", {"label": "no value"}],
+        ),
+    )
+    status = read_status(tmp_path, ".runtime/status.json")
+    assert status["state"] == "unknown"
+    assert len(status["headline"]) == 120
+    assert len(status["metrics"]) == MAX_STATUS_METRICS
+    assert len(status["metrics"][0]["label"]) == 40
+    assert len(status["metrics"][0]["value"]) == 80
+
+
+def test_read_status_ignores_an_oversized_file(tmp_path: Path) -> None:
+    _write_status(tmp_path, _status_document(headline="x" * 100_000))
+    status = read_status(tmp_path, ".runtime/status.json")
+    assert status["state"] == "error"
+    assert "too large" in status["headline"]
+
+
+def _status_dashboard(tmp_path: Path, status_file: str | None) -> Dashboard:
+    lab_root = tmp_path / "lab"
+    (lab_root / "sample").mkdir(parents=True)
+    project: dict[str, object] = {
+        "id": "sample",
+        "name": "Sample",
+        "path": "sample",
+        "ports": [],
+        "actions": {"test": ["python3", "-c", "print('ok')"]},
+    }
+    if status_file is not None:
+        project["status_file"] = status_file
+    config_path = tmp_path / "projects.json"
+    config_path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+    return Dashboard(
+        config_path=config_path,
+        lab_root=lab_root,
+        jobs=JobManager(runtime_root=tmp_path / "runtime"),
+    )
+
+
+def test_overview_surfaces_a_published_status(tmp_path: Path) -> None:
+    dashboard = _status_dashboard(tmp_path, ".runtime/status.json")
+    _write_status(tmp_path / "lab" / "sample", _status_document())
+    try:
+        project = dashboard.overview()["projects"][0]
+        assert project["status"]["headline"] == "8/8 techniques covered"
+        assert "status_file" not in project
+    finally:
+        dashboard.close()
+
+
+def test_overview_leaves_status_null_for_projects_that_publish_none(tmp_path: Path) -> None:
+    dashboard = _status_dashboard(tmp_path, None)
+    try:
+        assert dashboard.overview()["projects"][0]["status"] is None
+    finally:
+        dashboard.close()
+
+
+@pytest.mark.parametrize("status_file", ["../escape.json", "", 7])
+def test_dashboard_rejects_an_unsafe_status_file_at_startup(
+    tmp_path: Path, status_file: object
+) -> None:
+    with pytest.raises(ValueError):
+        _status_dashboard(tmp_path, status_file)  # type: ignore[arg-type]

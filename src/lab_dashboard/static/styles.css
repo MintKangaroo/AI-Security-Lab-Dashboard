@@ -2008,3 +2008,56 @@ kbd {
     transition-duration: 0.01ms !important;
   }
 }
+
+.lab-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.lab-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #535d5d;
+}
+
+.lab-status.ok i {
+  background: var(--mint);
+  box-shadow: 0 0 8px rgba(137, 232, 200, 0.4);
+}
+
+.lab-status.warn i {
+  background: var(--amber);
+}
+
+.lab-status.error i {
+  background: var(--coral);
+}
+
+.lab-status-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.lab-status-head .lab-status {
+  margin-top: 0;
+}
+
+.lab-status-head strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.lab-status-stamp {
+  color: var(--dim);
+  font-size: 9px;
+}

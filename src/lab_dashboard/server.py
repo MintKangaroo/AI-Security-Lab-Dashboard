@@ -27,6 +27,10 @@ DEFAULT_CONFIG = PACKAGE_ROOT / "config" / "projects.json"
 RUNTIME_ROOT = REPO_ROOT / ".runtime"
 MUTATION_HEADER = "X-Lab-Dashboard"
 MAX_BODY_SIZE = 32_768
+STATUS_SCHEMA = "lab-status/1"
+STATUS_STATES = frozenset({"ok", "warn", "error", "unknown"})
+MAX_STATUS_BYTES = 64_000
+MAX_STATUS_METRICS = 12
 
 
 def utc_now() -> str:
@@ -56,6 +60,74 @@ def _safe_project_path(lab_root: Path, relative_path: str) -> Path:
     if candidate.parent != resolved_root:
         raise ValueError(f"Project path must be a direct child of the lab root: {relative_path}")
     return candidate
+
+
+def _safe_status_path(project_path: Path, relative: str) -> Path:
+    candidate = (project_path / relative).resolve()
+    root = project_path.resolve()
+    if candidate == root or root not in candidate.parents:
+        raise ValueError(f"Status file must live inside the project: {relative}")
+    return candidate
+
+
+def _status_note(headline: str, state: str = "error") -> dict[str, Any]:
+    return {
+        "state": state,
+        "headline": headline,
+        "generated_at": "",
+        "last_run_at": "",
+        "metrics": [],
+    }
+
+
+def _clip(value: Any, limit: int) -> str:
+    return value[:limit] if isinstance(value, str) else ""
+
+
+def read_status(project_path: Path, relative: str | None) -> dict[str, Any] | None:
+    """Read a status document a project publishes about its own work.
+
+    The dashboard knows nothing about what the numbers mean; it renders
+    label/value pairs. The file is written by the project rather than by the
+    dashboard, so every field is treated as untrusted input: an unrecognised
+    state collapses to "unknown", the metric list is capped, and each string is
+    truncated before it reaches the browser.
+    """
+    if not relative:
+        return None
+    try:
+        path = _safe_status_path(project_path, relative)
+    except ValueError as error:
+        return _status_note(str(error))
+    if not path.is_file():
+        return _status_note("no status published", state="unknown")
+    try:
+        if path.stat().st_size > MAX_STATUS_BYTES:
+            return _status_note("status file is too large to read")
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _status_note("status file is unreadable")
+    if not isinstance(document, dict) or document.get("schema") != STATUS_SCHEMA:
+        return _status_note(f"unsupported status schema, expected {STATUS_SCHEMA}")
+
+    metrics: list[dict[str, str]] = []
+    for entry in document.get("metrics") or []:
+        if len(metrics) == MAX_STATUS_METRICS:
+            break
+        if not isinstance(entry, dict):
+            continue
+        label = _clip(entry.get("label"), 40)
+        value = _clip(entry.get("value"), 80)
+        if label and value:
+            metrics.append({"label": label, "value": value})
+    state = document.get("state")
+    return {
+        "state": state if state in STATUS_STATES else "unknown",
+        "headline": _clip(document.get("headline"), 120) or "status published",
+        "generated_at": _clip(document.get("generated_at"), 40),
+        "last_run_at": _clip(document.get("last_run_at"), 40),
+        "metrics": metrics,
+    }
 
 
 def git_status(project_path: Path) -> dict[str, Any]:
@@ -497,7 +569,12 @@ class Dashboard:
             if project_id in seen:
                 raise ValueError(f"Duplicate project id: {project_id}")
             seen.add(project_id)
-            _safe_project_path(self.lab_root, project["path"])
+            project_path = _safe_project_path(self.lab_root, project["path"])
+            status_file = project.get("status_file")
+            if status_file is not None:
+                if not isinstance(status_file, str) or not status_file:
+                    raise ValueError(f"Status file must be a relative path: {project_id}")
+                _safe_status_path(project_path, status_file)
             if project.get("managed_start") and "start" not in project.get("actions", {}):
                 raise ValueError(f"Managed project must define a start action: {project_id}")
             for action, command in project.get("actions", {}).items():
@@ -517,12 +594,13 @@ class Dashboard:
         snapshot = {
             key: value
             for key, value in project.items()
-            if key not in {"actions", "health_contains"}
+            if key not in {"actions", "health_contains", "status_file"}
         }
         snapshot["path"] = str(project_path)
         snapshot["exists"] = project_path.is_dir()
         snapshot["git"] = git_status(project_path)
         snapshot["health"] = health
+        snapshot["status"] = read_status(project_path, project.get("status_file"))
         active_job = self.jobs.active_for(project["id"])
         available_actions = list(project.get("actions", {}).keys())
         if (

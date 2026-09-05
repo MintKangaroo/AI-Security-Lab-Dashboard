@@ -138,6 +138,7 @@
       "ports": [],
       "app_url": null,
       "health_url": null,
+      "status_file": ".runtime/status.json",
       "actions": {
         "test": ["make", "test"]
       }

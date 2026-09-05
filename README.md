@@ -72,6 +72,7 @@ flowchart LR
 
 - 7개 프로젝트의 현재 브랜치, 수정/미추적 파일, upstream 차이, 최근 커밋 수집
 - 등록된 health endpoint의 온라인, 오프라인, 다른 서비스 점유 상태 확인
+- 서비스가 없는 프로젝트가 게시한 `lab-status/1` 상태 문서 수집과 표시
 - 프로젝트명, 스택, 브랜치 검색과 변경/실행 상태 필터
 - 기본 포트를 공유하는 프로젝트의 동시 실행 충돌 경고
 - 프로젝트별 또는 선택 프로젝트 일괄 시작, 중지, 테스트
@@ -90,7 +91,8 @@ flowchart LR
 | 작업 제어 | 완료 | 비동기 시작·중지·테스트, 중복 실행 차단, 관리형 서비스 종료 |
 | 작업 이력 | 완료 | `.runtime/jobs.json`에 저장하고 재시작 중 작업은 `interrupted`로 표시 |
 | 시각화 | 완료 | 반응형 대시보드, 프로젝트 검색/필터, Mermaid 구조도, README 스크린샷 |
-| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 11개 테스트, Ruff, 브라우저 JS 검사 |
+| 랩 telemetry | 완료 | 프로젝트가 게시한 `lab-status/1` 문서를 검증 후 카드·상세에 표시 |
+| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 28개 테스트, Ruff, 브라우저 JS 검사 |
 
 현재 남은 것은 배포 환경에 따른 운영 설정뿐입니다. 각 하위 프로젝트의 Docker 이미지,
 `.env` 값, 데이터베이스/Neo4j 같은 의존성은 해당 프로젝트에서 준비해야 하며, 이 대시보드는
@@ -171,6 +173,7 @@ RLAttack처럼 포그라운드에서 계속 실행되는 서비스는 Dashboard-
   "ports": [8080],
   "health_url": "http://127.0.0.1:8080/health",
   "health_contains": "example",
+  "status_file": ".runtime/status.json",
   "actions": {
     "start": ["docker", "compose", "up", "-d"],
     "stop": ["docker", "compose", "down"],
@@ -178,6 +181,28 @@ RLAttack처럼 포그라운드에서 계속 실행되는 서비스는 Dashboard-
   }
 }
 ```
+
+### 랩 telemetry (`status_file`)
+
+health endpoint가 없는 프로젝트도 자기 작업 결과를 게시할 수 있습니다. `status_file`에
+프로젝트 안의 상대 경로를 지정하면 대시보드가 그 파일을 읽어 카드와 상세 패널에
+표시합니다. 현재 Caldera Lab이 `caldera-lab run` 이후 `.runtime/status.json`을 씁니다.
+
+```json
+{
+  "schema": "lab-status/1",
+  "generated_at": "2026-09-05T10:56:59Z",
+  "state": "ok",
+  "headline": "8/8 techniques covered",
+  "metrics": [{ "label": "ATT&CK coverage", "value": "8/8" }]
+}
+```
+
+대시보드는 이 숫자들이 무엇을 뜻하는지 알지 못합니다. label/value 쌍을 그대로 그릴 뿐이며,
+도메인 해석은 파일을 쓰는 프로젝트가 책임집니다. 파일은 대시보드가 아니라 프로젝트가
+쓰므로 신뢰하지 않는 입력으로 다룹니다: 스키마가 다르면 거부하고, 프로젝트 밖을 가리키는
+경로와 심볼릭 링크는 거부하며, 지표 개수와 문자열 길이를 잘라냅니다. 모르는 `state`는
+`unknown`으로 내려앉습니다.
 
 다른 Lab 경로를 사용하려면 환경 변수로 덮어쓸 수 있습니다.
 
@@ -199,6 +224,8 @@ lab-dashboard --config ./my-projects.json
 - `stop`은 볼륨 삭제 옵션을 사용하지 않습니다.
 - 명령은 프로젝트 설정에 등록된 `start`, `stop`, `test`만 허용합니다.
 - Git 조회와 health check는 읽기 전용입니다.
+- `status_file`은 프로젝트 디렉터리 안으로 제한되고, 스키마·크기·길이를 검증한 뒤에만
+  화면에 올라갑니다. 프로젝트가 쓰는 파일이므로 신뢰하지 않는 입력으로 취급합니다.
 
 공유 서버에서 사용하려면 인증과 TLS를 제공하는 별도 Reverse Proxy를 먼저 구성해야
 합니다. 이 프로젝트는 개인 개발 워크스테이션의 로컬 운영 화면을 목표로 합니다.
@@ -211,6 +238,7 @@ flowchart LR
     API["Local-only JSON API<br/>127.0.0.1:4173"]
     Git["Git status collector"]
     Health["Health checker"]
+    Status["lab-status reader"]
     Queue["Fixed-command job queue"]
     Logs[(".runtime/*.log")]
     Repos["AI Security Lab<br/>repositories"]
@@ -218,9 +246,11 @@ flowchart LR
     Browser <-->|"HTTP"| API
     API --> Git
     API --> Health
+    API --> Status
     API --> Queue
     Git -->|"read-only"| Repos
     Health -->|"loopback probe"| Repos
+    Status -->|"read-only · validated"| Repos
     Queue -->|"start · stop · test"| Repos
     Queue --> Logs
 ```
@@ -233,7 +263,8 @@ node --check src/lab_dashboard/static/app.js
 ```
 
 테스트는 경로 탈출 차단, Git 상태 수집, 포트폴리오 집계, 로컬 API 보호, 중복 작업 차단,
-관리형 서비스의 실제 시작·중지를 검증합니다. GitHub Actions는 Python 3.10과 3.12에서
+관리형 서비스의 실제 시작·중지, 그리고 랩 telemetry의 스키마·경로·심볼릭 링크·크기 거부를
+검증합니다. GitHub Actions는 Python 3.10과 3.12에서
 동일한 검사를 실행합니다.
 
 ## 라이선스

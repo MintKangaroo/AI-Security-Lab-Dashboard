@@ -45,6 +45,13 @@ const healthLabels = {
   not_configured: "해당 없음",
 };
 
+const statusStateLabels = {
+  ok: "정상",
+  warn: "확인 필요",
+  error: "읽기 실패",
+  unknown: "기록 없음",
+};
+
 const jobStatusLabels = {
   queued: "대기",
   running: "실행 중",
@@ -170,6 +177,45 @@ function projectMatches(project) {
   return haystack.includes(state.query.toLowerCase());
 }
 
+function statusPill(status) {
+  if (!status) return "";
+  return `
+    <span class="lab-status ${escapeHTML(status.state)}" title="${escapeHTML(status.headline)}">
+      <i></i>${escapeHTML(statusStateLabels[status.state] || status.state)}
+    </span>
+  `;
+}
+
+function labStatusSection(status) {
+  if (!status) return "";
+  const metrics = status.metrics
+    .map(
+      (metric) => `
+        <div class="detail-card">
+          <span>${escapeHTML(metric.label)}</span>
+          <strong>${escapeHTML(metric.value)}</strong>
+        </div>
+      `,
+    )
+    .join("");
+  const stamp = status.generated_at
+    ? `<small class="lab-status-stamp">${relativeTime(status.generated_at)} 기록</small>`
+    : "";
+  return `
+    <section class="drawer-section">
+      <h3>Lab telemetry</h3>
+      <div class="lab-status-head">
+        <span class="lab-status ${escapeHTML(status.state)}">
+          <i></i>${escapeHTML(statusStateLabels[status.state] || status.state)}
+        </span>
+        <strong>${escapeHTML(status.headline)}</strong>
+        ${stamp}
+      </div>
+      ${metrics ? `<div class="detail-grid">${metrics}</div>` : ""}
+    </section>
+  `;
+}
+
 function projectRow(project) {
   const selected = state.selected.has(project.id);
   const dirty = project.git.modified + project.git.untracked > 0;
@@ -204,6 +250,7 @@ function projectRow(project) {
         <strong>${escapeHTML(project.stage || "In progress")}</strong>
         <div class="stack-dots">${dots}</div>
         <small>${escapeHTML((project.stack || []).slice(0, 2).join(" · "))}</small>
+        ${statusPill(project.status)}
       </div>
       <div class="runtime-cell">
         <span class="runtime-state ${escapeHTML(health)}">
@@ -409,6 +456,8 @@ function openDrawer(projectId) {
           ${(project.stack || []).map((tag) => `<span class="tag">${escapeHTML(tag)}</span>`).join("")}
         </div>
       </section>
+
+      ${labStatusSection(project.status)}
 
       <section class="drawer-section">
         <h3>Latest commit</h3>
