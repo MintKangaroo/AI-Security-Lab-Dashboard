@@ -95,9 +95,9 @@ function shortPath(path) {
   return parts.length > 3 ? `…/${parts.slice(-2).join("/")}` : path;
 }
 
-function accentClass(projectId) {
-  return `accent-${String(projectId).toLowerCase().replaceAll(/[^a-z0-9_-]/g, "-")}`;
-}
+// Accents come from /accents.css, generated from the same config: the
+// dashboard serves style-src 'self', so an inline style attribute would be
+// dropped without an error.
 
 function setLoading(loading) {
   const button = document.getElementById("refreshButton");
@@ -233,7 +233,7 @@ function projectRow(project) {
 
   return `
     <article
-      class="project-row ${accentClass(project.id)} ${selected ? "is-selected" : ""}"
+      class="project-row ${selected ? "is-selected" : ""}"
       data-project-id="${escapeHTML(project.id)}"
     >
       <button class="select-box" data-select-project="${escapeHTML(project.id)}" aria-label="${escapeHTML(project.name)} 선택">
@@ -405,7 +405,7 @@ function openDrawer(projectId) {
   const ports = project.ports || [];
   const syncState = `↑ ${project.git.ahead} · ↓ ${project.git.behind}`;
   document.getElementById("drawerContent").innerHTML = `
-    <div class="${accentClass(project.id)}">
+    <div class="drawer-project" data-project-id="${escapeHTML(project.id)}">
       <div class="drawer-project-head">
         <div class="project-avatar">${escapeHTML(project.short_name || project.name.slice(0, 2))}</div>
         <div>

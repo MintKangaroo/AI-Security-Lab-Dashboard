@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from lab_dashboard.server import (
+    ACCENT_PATTERN,
+    DEFAULT_CONFIG,
     MAX_STATUS_METRICS,
     STATUS_SCHEMA,
     Dashboard,
@@ -425,3 +427,113 @@ def test_dashboard_rejects_an_unsafe_status_file_at_startup(
 ) -> None:
     with pytest.raises(ValueError):
         _status_dashboard(tmp_path, status_file)  # type: ignore[arg-type]
+
+
+def _accent_dashboard(tmp_path: Path, accent: object) -> Dashboard:
+    lab_root = tmp_path / "lab"
+    (lab_root / "sample").mkdir(parents=True)
+    project: dict[str, object] = {
+        "id": "sample",
+        "name": "Sample",
+        "path": "sample",
+        "ports": [],
+        "accent": accent,
+        "actions": {"test": ["python3", "-c", "print('ok')"]},
+    }
+    config_path = tmp_path / "projects.json"
+    config_path.write_text(json.dumps({"projects": [project]}), encoding="utf-8")
+    return Dashboard(
+        config_path=config_path,
+        lab_root=lab_root,
+        jobs=JobManager(runtime_root=tmp_path / "runtime"),
+    )
+
+
+def test_every_configured_project_declares_an_accent() -> None:
+    """The accent used to live in CSS, so a newly registered project rendered
+    with an undefined custom property until someone remembered to add a rule."""
+    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    for project in config["projects"]:
+        assert ACCENT_PATTERN.match(project["accent"]), project["id"]
+
+
+@pytest.mark.parametrize(
+    "accent", ["red", "#fff", "#12345g", "#ffb86b; background: url(x)", 0xFFB86B]
+)
+def test_dashboard_rejects_an_accent_it_cannot_put_in_a_style_attribute(
+    tmp_path: Path, accent: object
+) -> None:
+    with pytest.raises(ValueError):
+        _accent_dashboard(tmp_path, accent)
+
+
+def test_overview_passes_the_accent_through(tmp_path: Path) -> None:
+    dashboard = _accent_dashboard(tmp_path, "#ffb86b")
+    try:
+        assert dashboard.overview()["projects"][0]["accent"] == "#ffb86b"
+    finally:
+        dashboard.close()
+
+
+def test_accent_css_covers_every_configured_project(tmp_path: Path) -> None:
+    dashboard = _accent_dashboard(tmp_path, "#ffb86b")
+    try:
+        assert dashboard.accent_css() == (
+            '[data-project-id="sample"] { --project-accent: #ffb86b; }\n'
+        )
+    finally:
+        dashboard.close()
+
+
+def test_shipped_config_gives_every_project_an_accent_rule() -> None:
+    dashboard = Dashboard()
+    try:
+        css = dashboard.accent_css()
+        for project in dashboard.projects:
+            assert f'[data-project-id="{project["id"]}"]' in css
+    finally:
+        dashboard.close()
+
+
+def test_accents_are_served_as_a_stylesheet_because_inline_styles_are_blocked(
+    tmp_path: Path,
+) -> None:
+    """style-src 'self' drops a style attribute silently: it stays in the DOM
+    and never applies. Accents therefore have to arrive as a real stylesheet."""
+    dashboard = _accent_dashboard(tmp_path, "#ffb86b")
+    server = create_server("127.0.0.1", 0, dashboard)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(f"{base_url}/accents.css") as response:
+            body = response.read().decode("utf-8")
+            assert response.headers["Content-Type"] == "text/css; charset=utf-8"
+            policy = response.headers["Content-Security-Policy"]
+        assert "--project-accent: #ffb86b" in body
+        assert "style-src 'self'" in policy
+        assert "unsafe-inline" not in policy
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        dashboard.close()
+
+
+@pytest.mark.parametrize("project_id", ["Sample", 'a"] {}', "with space", 7])
+def test_dashboard_rejects_a_project_id_it_cannot_put_in_a_selector(
+    tmp_path: Path, project_id: object
+) -> None:
+    lab_root = tmp_path / "lab"
+    (lab_root / "sample").mkdir(parents=True)
+    config_path = tmp_path / "projects.json"
+    config_path.write_text(
+        json.dumps({"projects": [{"id": project_id, "name": "S", "path": "sample", "ports": []}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        Dashboard(
+            config_path=config_path,
+            lab_root=lab_root,
+            jobs=JobManager(runtime_root=tmp_path / "runtime"),
+        )

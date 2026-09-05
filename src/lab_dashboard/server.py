@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -31,6 +32,8 @@ STATUS_SCHEMA = "lab-status/1"
 STATUS_STATES = frozenset({"ok", "warn", "error", "unknown"})
 MAX_STATUS_BYTES = 64_000
 MAX_STATUS_METRICS = 12
+ACCENT_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def utc_now() -> str:
@@ -566,10 +569,19 @@ class Dashboard:
         seen: set[str] = set()
         for project in self.projects:
             project_id = project["id"]
+            # Ids end up in a CSS attribute selector, so keep them boring.
+            if not isinstance(project_id, str) or not PROJECT_ID_PATTERN.match(project_id):
+                raise ValueError(f"Project id must be lowercase and url-safe: {project_id!r}")
             if project_id in seen:
                 raise ValueError(f"Duplicate project id: {project_id}")
             seen.add(project_id)
             project_path = _safe_project_path(self.lab_root, project["path"])
+            accent = project.get("accent")
+            # The browser puts this straight into a style attribute.
+            if accent is not None and not (
+                isinstance(accent, str) and ACCENT_PATTERN.match(accent)
+            ):
+                raise ValueError(f"Accent must be a #rrggbb colour: {project_id}")
             status_file = project.get("status_file")
             if status_file is not None:
                 if not isinstance(status_file, str) or not status_file:
@@ -587,6 +599,23 @@ class Dashboard:
                 ):
                     message = f"Action must be a non-empty command array: {project_id}/{action}"
                     raise ValueError(message)
+
+    def accent_css(self) -> str:
+        """Per-project accents as a real stylesheet.
+
+        These cannot be inline `style` attributes: the dashboard serves
+        `style-src 'self'`, which drops them silently -- the attribute lands in
+        the DOM and the declaration never applies. Hardcoding one CSS rule per
+        project instead meant a newly registered project rendered with an
+        undefined custom property until someone remembered the rule, so the
+        config is the single source and this is generated from it.
+        """
+        rules = [
+            f'[data-project-id="{project["id"]}"] {{ --project-accent: {project["accent"]}; }}'
+            for project in self.projects
+            if project.get("accent")
+        ]
+        return "\n".join(rules) + "\n"
 
     def project_snapshot(self, project: dict[str, Any]) -> dict[str, Any]:
         project_path = _safe_project_path(self.lab_root, project["path"])
@@ -760,6 +789,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.NOT_FOUND, "작업 로그를 찾을 수 없습니다.")
                 return
             self._json({"job_id": job_id, "log": log})
+            return
+        if path == "/accents.css":
+            body = self.dashboard.accent_css().encode("utf-8")
+            self._send_headers(HTTPStatus.OK, "text/css; charset=utf-8", len(body))
+            self.wfile.write(body)
             return
         if path.startswith("/api/"):
             self._error(HTTPStatus.NOT_FOUND, "API 경로를 찾을 수 없습니다.")

@@ -871,28 +871,10 @@ kbd {
     transform 160ms ease;
 }
 
-.accent-aishield {
-  --project-accent: #89e8c8;
-}
-
-.accent-autopentest-ai {
-  --project-accent: #f6c66d;
-}
-
-.accent-redmind {
-  --project-accent: #d8a7ff;
-}
-
-.accent-rlattack {
-  --project-accent: #89b8ff;
-}
-
-.accent-sentinelflow {
-  --project-accent: #ff8f81;
-}
-
-.accent-threatgraph {
-  --project-accent: #66d4ef;
+/* Set per project from the config's `accent`; this is the fallback. */
+.project-row,
+.drawer-project {
+  --project-accent: var(--mint);
 }
 
 .project-row:last-child {

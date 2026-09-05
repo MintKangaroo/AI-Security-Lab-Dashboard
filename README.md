@@ -92,7 +92,7 @@ flowchart LR
 | 작업 이력 | 완료 | `.runtime/jobs.json`에 저장하고 재시작 중 작업은 `interrupted`로 표시 |
 | 시각화 | 완료 | 반응형 대시보드, 프로젝트 검색/필터, Mermaid 구조도, README 스크린샷 |
 | 랩 telemetry | 완료 | 프로젝트가 게시한 `lab-status/1` 문서를 검증 후 카드·상세에 표시 |
-| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 28개 테스트, Ruff, 브라우저 JS 검사 |
+| 품질 검증 | 완료 | Python 3.10/3.12 GitHub Actions, 42개 테스트, Ruff, 브라우저 JS 검사 |
 
 현재 남은 것은 배포 환경에 따른 운영 설정뿐입니다. 각 하위 프로젝트의 Docker 이미지,
 `.env` 값, 데이터베이스/Neo4j 같은 의존성은 해당 프로젝트에서 준비해야 하며, 이 대시보드는
@@ -173,6 +173,7 @@ RLAttack처럼 포그라운드에서 계속 실행되는 서비스는 Dashboard-
   "ports": [8080],
   "health_url": "http://127.0.0.1:8080/health",
   "health_contains": "example",
+  "accent": "#ffb86b",
   "status_file": ".runtime/status.json",
   "actions": {
     "start": ["docker", "compose", "up", "-d"],
@@ -197,6 +198,16 @@ health endpoint가 없는 프로젝트도 자기 작업 결과를 게시할 수 
   "metrics": [{ "label": "ATT&CK coverage", "value": "8/8" }]
 }
 ```
+
+### 강조색
+
+`accent`(`#rrggbb`)는 프로젝트 행과 상세 패널의 강조색입니다. 대시보드는 이 값들을
+`/accents.css`로 생성해 내려보냅니다. 인라인 `style` 속성이 아닌 이유는 `style-src 'self'`
+때문입니다 — 인라인 속성은 DOM에 남은 채 적용만 조용히 무시되므로 오류 없이 색이 빠집니다.
+
+전에는 프로젝트마다 CSS 규칙을 손으로 적었고, 새 프로젝트를 등록하면 규칙을 추가할 때까지
+정의되지 않은 custom property로 렌더링됐습니다(Caldera Lab이 그 상태였습니다). 이제 설정이
+유일한 출처이며, 설정의 모든 프로젝트가 규칙을 갖는지 테스트로 확인합니다.
 
 대시보드는 이 숫자들이 무엇을 뜻하는지 알지 못합니다. label/value 쌍을 그대로 그릴 뿐이며,
 도메인 해석은 파일을 쓰는 프로젝트가 책임집니다. 파일은 대시보드가 아니라 프로젝트가
@@ -224,6 +235,7 @@ lab-dashboard --config ./my-projects.json
 - `stop`은 볼륨 삭제 옵션을 사용하지 않습니다.
 - 명령은 프로젝트 설정에 등록된 `start`, `stop`, `test`만 허용합니다.
 - Git 조회와 health check는 읽기 전용입니다.
+- 프로젝트 `id`와 `accent`는 CSS 선택자와 값으로 들어가므로 형식을 검증한 뒤에만 받습니다.
 - `status_file`은 프로젝트 디렉터리 안으로 제한되고, 스키마·크기·길이를 검증한 뒤에만
   화면에 올라갑니다. 프로젝트가 쓰는 파일이므로 신뢰하지 않는 입력으로 취급합니다.
 
